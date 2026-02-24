@@ -137,13 +137,32 @@ def create_torch_dataset(
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
-    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
+    # Build kwargs for local dataset support
+    local_kwargs: dict = {}
+    if data_config.root is not None:
+        local_kwargs["root"] = data_config.root
+    if data_config.local_files_only:
+        local_kwargs["local_files_only"] = True
+
+    dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, **local_kwargs)
+    # Use tolerance_s=0.17 to pass timestamp checks for all episodes (including any
+    # with timing jitter). Episode filtering happens below via Subset.
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         delta_timestamps={
             key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
         },
+        tolerance_s=0.17,
+        **local_kwargs,
     )
+
+    # Filter to specific episodes using Subset. We avoid LeRobotDataset's episodes
+    # param due to a bug in lerobot 0.1.0 (episode_data_index is dense but
+    # __getitem__ indexes by original episode_index).
+    if data_config.episodes is not None:
+        episodes_set = set(data_config.episodes)
+        indices = [i for i in range(len(dataset)) if dataset.hf_dataset[i]["episode_index"].item() in episodes_set]
+        dataset = torch.utils.data.Subset(dataset, indices)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
