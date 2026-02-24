@@ -69,8 +69,6 @@ class DataConfig:
     episodes: Sequence[int] | None = None
     # Local root directory for the dataset. If set, loads from disk instead of HF Hub.
     root: str | None = None
-    # If True, only load from local files (no HF Hub downloads).
-    local_files_only: bool = False
     # Directory within the assets directory containing the data assets.
     asset_id: str | None = None
     # Contains precomputed normalization stats. If None, normalization will not be performed.

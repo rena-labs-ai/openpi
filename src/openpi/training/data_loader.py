@@ -141,8 +141,6 @@ def create_torch_dataset(
     local_kwargs: dict = {}
     if data_config.root is not None:
         local_kwargs["root"] = data_config.root
-    if data_config.local_files_only:
-        local_kwargs["local_files_only"] = True
 
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id, **local_kwargs)
     # Use tolerance_s=0.17 to pass timestamp checks for all episodes (including any
