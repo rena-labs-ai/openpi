@@ -35,12 +35,20 @@ class ModelType(enum.Enum):
     PI05 = "pi05"
 
 
-# The model always expects these images
+# The model always expects these images.
+# "grounded_rgb" is added for Point-VLA visual grounding (rena fork).
 IMAGE_KEYS = (
     "base_0_rgb",
     "left_wrist_0_rgb",
     "right_wrist_0_rgb",
+    "grounded_rgb",
 )
+
+# Keys whose images should NOT receive augmax augmentation during training.
+# Grounded frames already carry rena-training's own bbox + translation +
+# CutMix augmentations; additional random crop/rotate/jitter would distort
+# the bbox overlay.
+NO_AUGMENT_KEYS = frozenset({"grounded_rgb"})
 
 
 # This may need change if we release a small model.
@@ -165,7 +173,7 @@ def preprocess_observation(
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
             image = image_tools.resize_with_pad(image, *image_resolution)
 
-        if train:
+        if train and key not in NO_AUGMENT_KEYS:
             # Convert from [-1, 1] to [0, 1] for augmax.
             image = image / 2.0 + 0.5
 
