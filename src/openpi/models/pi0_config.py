@@ -84,6 +84,7 @@ class Pi0Config(_model.BaseModelConfig):
         has_lora = False
         gemma_params_filter = nnx_utils.PathRegex(".*llm.*")
         action_expert_params_filter = nnx_utils.PathRegex(".*llm.*_1.*")
+        img_params_filter = nnx_utils.PathRegex(".*img.*")
         if "lora" in self.paligemma_variant:
             filters.append(
                 gemma_params_filter,
@@ -95,8 +96,10 @@ class Pi0Config(_model.BaseModelConfig):
                 )
             has_lora = True
         elif "lora" in self.action_expert_variant:
+            # Freeze entire VLM (llm + img) and action expert base weights.
+            # Only action expert LoRA adapters + projection heads will train.
             filters.append(
-                action_expert_params_filter,
+                nnx.Any(gemma_params_filter, img_params_filter),
             )
             has_lora = True
 
