@@ -130,7 +130,7 @@ def _decode_jpeg_images(obs: dict) -> dict:
             continue
 
         raw = None
-        if isinstance(val, (bytes, bytearray)):
+        if isinstance(val, bytes | bytearray):
             raw = val
         elif isinstance(val, np.ndarray) and val.dtype.kind in ("S", "U", "V", "O"):
             # msgpack_numpy wraps bytes as a numpy array with bytes/void dtype (e.g. |S30570)
