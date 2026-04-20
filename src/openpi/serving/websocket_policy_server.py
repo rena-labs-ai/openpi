@@ -4,6 +4,8 @@ import logging
 import time
 import traceback
 
+import cv2
+import numpy as np
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
 import websockets.asyncio.server as _server
@@ -52,24 +54,55 @@ class WebsocketPolicyServer:
         await websocket.send(packer.pack(self._metadata))
 
         prev_total_time = None
+        req_count = 0
         while True:
             try:
-                start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
+                t0 = time.monotonic()
+                raw = await websocket.recv()
+                t1 = time.monotonic()
 
-                infer_time = time.monotonic()
+                obs = msgpack_numpy.unpackb(raw)
+                t2 = time.monotonic()
+
+                obs = _decode_jpeg_images(obs)
+                t2b = time.monotonic()
+
                 action = self._policy.infer(obs)
-                infer_time = time.monotonic() - infer_time
+                t3 = time.monotonic()
+
+                # Extract per-stage policy timing before packing
+                policy_timing = action.pop("policy_timing", {})
+
+                packed = packer.pack(action)
+                t4 = time.monotonic()
 
                 action["server_timing"] = {
-                    "infer_ms": infer_time * 1000,
+                    "recv_ms": (t1 - t0) * 1000,
+                    "unpack_ms": (t2 - t1) * 1000,
+                    "jpeg_decode_ms": (t2b - t2) * 1000,
+                    "infer_ms": (t3 - t2b) * 1000,
+                    "pack_ms": (t4 - t3) * 1000,
+                    **policy_timing,
                 }
                 if prev_total_time is not None:
-                    # We can only record the last total time since we also want to include the send time.
                     action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
 
-                await websocket.send(packer.pack(action))
-                prev_total_time = time.monotonic() - start_time
+                await websocket.send(packed)
+                t5 = time.monotonic()
+
+                prev_total_time = t5 - t0
+                req_count += 1
+
+                pt = policy_timing
+                logger.info(
+                    f"[req {req_count}] recv={(t1-t0)*1000:.0f}ms | unpack={(t2-t1)*1000:.0f}ms | "
+                    f"jpeg_dec={(t2b-t2)*1000:.0f}ms | "
+                    f"in_xform={pt.get('input_transform_ms',0):.0f}ms | to_dev={pt.get('to_device_ms',0):.0f}ms | "
+                    f"build_obs={pt.get('build_obs_ms',0):.0f}ms | sample={pt.get('sample_actions_ms',0):.0f}ms | "
+                    f"to_np={pt.get('to_numpy_ms',0):.0f}ms | out_xform={pt.get('output_transform_ms',0):.0f}ms | "
+                    f"pack={(t4-t3)*1000:.0f}ms | send={(t5-t4)*1000:.0f}ms | "
+                    f"TOTAL={(t5-t0)*1000:.0f}ms | payload={len(raw)/1e6:.2f}MB"
+                )
 
             except websockets.ConnectionClosed:
                 logger.info(f"Connection from {websocket.remote_address} closed")
@@ -81,6 +114,37 @@ class WebsocketPolicyServer:
                     reason="Internal server error. Traceback included in previous frame.",
                 )
                 raise
+
+
+def _decode_jpeg_images(obs: dict) -> dict:
+    """Decode JPEG-encoded images in-place at any level of the obs dict.
+
+    Handles both flat keys (e.g. "observation.images.base_rgb") and nested
+    dicts (e.g. obs["image"]["base_0_rgb"]). If a value is already a numpy
+    image array, it passes through unchanged.
+    """
+    for key, val in obs.items():
+        # Recurse into nested dicts (e.g. obs["image"] = {"base_0_rgb": ...})
+        if isinstance(val, dict):
+            _decode_jpeg_images(val)
+            continue
+
+        raw = None
+        if isinstance(val, (bytes, bytearray)):
+            raw = val
+        elif isinstance(val, np.ndarray) and val.dtype.kind in ("S", "U", "V", "O"):
+            # msgpack_numpy wraps bytes as a numpy array with bytes/void dtype (e.g. |S30570)
+            raw = bytes(val.flat[0]) if val.dtype.kind == "V" else val.flat[0]
+        else:
+            continue
+
+        buf = np.frombuffer(raw, dtype=np.uint8)
+        img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
+        if img is not None:
+            obs[key] = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        else:
+            logger.warning(f"Failed to decode JPEG for key '{key}'")
+    return obs
 
 
 def _health_check(connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:
