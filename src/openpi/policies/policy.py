@@ -66,9 +66,13 @@ class Policy(BasePolicy):
 
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
+        t0 = time.monotonic()
+
         # Make a copy since transformations may modify the inputs in place.
         inputs = jax.tree.map(lambda x: x, obs)
         inputs = self._input_transform(inputs)
+        t1 = time.monotonic()
+
         if not self._is_pytorch_model:
             # Make a batch and convert to jax.Array.
             inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], inputs)
@@ -77,6 +81,7 @@ class Policy(BasePolicy):
             # Convert inputs to PyTorch tensors and move to correct device
             inputs = jax.tree.map(lambda x: torch.from_numpy(np.array(x)).to(self._pytorch_device)[None, ...], inputs)
             sample_rng_or_pytorch_device = self._pytorch_device
+        t2 = time.monotonic()
 
         # Prepare kwargs for sample_actions
         sample_kwargs = dict(self._sample_kwargs)
@@ -88,20 +93,31 @@ class Policy(BasePolicy):
             sample_kwargs["noise"] = noise
 
         observation = _model.Observation.from_dict(inputs)
-        start_time = time.monotonic()
+        t3 = time.monotonic()
+
         outputs = {
             "state": inputs["state"],
             "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
         }
-        model_time = time.monotonic() - start_time
+        t4 = time.monotonic()
+
         if self._is_pytorch_model:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
         else:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...]), outputs)
+        t5 = time.monotonic()
 
         outputs = self._output_transform(outputs)
+        t6 = time.monotonic()
+
         outputs["policy_timing"] = {
-            "infer_ms": model_time * 1000,
+            "input_transform_ms": (t1 - t0) * 1000,
+            "to_device_ms": (t2 - t1) * 1000,
+            "build_obs_ms": (t3 - t2) * 1000,
+            "sample_actions_ms": (t4 - t3) * 1000,
+            "to_numpy_ms": (t5 - t4) * 1000,
+            "output_transform_ms": (t6 - t5) * 1000,
+            "policy_total_ms": (t6 - t0) * 1000,
         }
         return outputs
 
