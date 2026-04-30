@@ -226,10 +226,19 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
-    # Log images from first batch to sanity check.
+    # Log images from first batch to sanity check, in the canonical IMAGE_KEYS
+    # order the model consumes (preprocess_observation re-keys via IMAGE_KEYS
+    # before tokenization). Caption labels the panels so dict-insertion order
+    # from the data pipeline can't be mistaken for model input order.
+    log_keys = [k for k in _model.IMAGE_KEYS if k in batch[0].images]
+    batch_size = len(batch[0].images[log_keys[0]])
+    caption = " | ".join(log_keys)
     images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
+        wandb.Image(
+            np.concatenate([np.array(batch[0].images[k][i]) for k in log_keys], axis=1),
+            caption=caption,
+        )
+        for i in range(min(5, batch_size))
     ]
     wandb.log({"camera_views": images_to_log}, step=0)
 
