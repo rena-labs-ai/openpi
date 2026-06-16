@@ -244,12 +244,24 @@ class BaseModelConfig(abc.ABC):
         """Create a new model, initializing parameters."""
 
     def load(self, params: at.Params, *, remove_extra_params: bool = True) -> "BaseModel":
-        """Create a model with the given parameters."""
-        model = nnx.eval_shape(self.create, jax.random.key(0))
+        """Create a model with the given parameters.
+
+        Parameters present in the model but absent from `params` (e.g. a head added
+        after the checkpoint was saved, like the stage-classification head) are left
+        at their freshly-initialized values. We therefore initialize the model for
+        real (rather than `eval_shape`) so the un-restored leaves carry real init
+        weights, validate shapes/dtypes for the overlapping leaves, then overlay the
+        loaded params.
+        """
+        model = self.create(jax.random.key(0))
         graphdef, state = nnx.split(model)
+        pure = state.to_pure_dict()
         if remove_extra_params:
-            params = ocp.transform_utils.intersect_trees(state.to_pure_dict(), params)
-        at.check_pytree_equality(expected=state.to_pure_dict(), got=params, check_shapes=True, check_dtypes=False)
+            params = ocp.transform_utils.intersect_trees(pure, params)
+        # Validate only the leaves we are about to overwrite; model-only leaves
+        # missing from the checkpoint keep their init values.
+        expected = ocp.transform_utils.intersect_trees(pure, params)
+        at.check_pytree_equality(expected=expected, got=params, check_shapes=True, check_dtypes=False)
         state.replace_by_pure_dict(params)
         return nnx.merge(graphdef, state)
 
