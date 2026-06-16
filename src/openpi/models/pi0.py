@@ -75,6 +75,19 @@ def masked_mean_pool(tokens, mask):
     return summed / count
 
 
+def stage_ce_and_acc(logits, labels, num_classes: int = 3):
+    """Softmax cross-entropy and accuracy for the stage head.
+
+    logits: float[b, num_classes]; labels: int[b]. Returns (scalar ce, scalar acc).
+    """
+    labels = labels.astype(jnp.int32)
+    onehot = jax.nn.one_hot(labels, num_classes)
+    logp = jax.nn.log_softmax(logits, axis=-1)
+    ce = -jnp.mean(jnp.sum(onehot * logp, axis=-1))
+    acc = jnp.mean((jnp.argmax(logits, axis=-1) == labels).astype(jnp.float32))
+    return ce, acc
+
+
 class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)

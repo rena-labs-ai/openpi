@@ -3,7 +3,7 @@ import jax
 import jax.numpy as jnp
 
 import openpi.models.pi0_config as _pi0_config
-from openpi.models.pi0 import masked_mean_pool
+from openpi.models.pi0 import masked_mean_pool, stage_ce_and_acc
 
 
 def test_masked_mean_pool_ignores_masked():
@@ -18,6 +18,22 @@ def test_masked_mean_pool_all_masked_is_safe():
     mask = jnp.array([[False, False]])
     out = masked_mean_pool(tokens, mask)
     assert jnp.all(jnp.isfinite(out))             # no NaN from divide-by-zero
+
+
+def test_stage_ce_perfect_prediction():
+    logits = jnp.array([[10.0, -10.0, -10.0], [-10.0, 10.0, -10.0]])  # argmax 0,1
+    labels = jnp.array([0, 1], dtype=jnp.int32)
+    ce, acc = stage_ce_and_acc(logits, labels, num_classes=3)
+    assert float(acc) == 1.0
+    assert float(ce) < 1e-3
+
+
+def test_stage_ce_wrong_prediction():
+    logits = jnp.array([[-10.0, 10.0, -10.0]])  # argmax 1
+    labels = jnp.array([0], dtype=jnp.int32)
+    ce, acc = stage_ce_and_acc(logits, labels, num_classes=3)
+    assert float(acc) == 0.0
+    assert float(ce) > 1.0
 
 
 def _get_frozen_state(config: _pi0_config.Pi0Config) -> nnx.State:
