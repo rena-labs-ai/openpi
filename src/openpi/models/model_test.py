@@ -1,5 +1,6 @@
 from flax import nnx
 import jax
+import numpy as np
 import pytest
 
 from openpi.models import model as _model
@@ -7,6 +8,26 @@ from openpi.models import pi0_config
 from openpi.models import pi0_fast
 from openpi.shared import download
 from openpi.shared import nnx_utils
+
+
+def _min_obs_dict(**extra):
+    return {
+        "image": {"base_0_rgb": np.zeros((1, 224, 224, 3), np.float32)},
+        "image_mask": {"base_0_rgb": np.ones((1,), bool)},
+        "state": np.zeros((1, 32), np.float32),
+        **extra,
+    }
+
+
+def test_task_stage_present():
+    obs = _model.Observation.from_dict(_min_obs_dict(task_stage=np.array([1], np.int32)))
+    assert obs.task_stage is not None
+    assert int(np.asarray(obs.task_stage)[0]) == 1
+
+
+def test_task_stage_absent_defaults_none():
+    obs = _model.Observation.from_dict(_min_obs_dict())
+    assert obs.task_stage is None
 
 
 def test_pi0_model():
