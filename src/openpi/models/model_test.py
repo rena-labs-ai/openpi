@@ -30,6 +30,13 @@ def test_task_stage_absent_defaults_none():
     assert obs.task_stage is None
 
 
+def test_task_stage_survives_preprocess():
+    obs = _model.Observation.from_dict(_min_obs_dict(task_stage=np.array([2], np.int32)))
+    out = _model.preprocess_observation(jax.random.key(0), obs, train=False, image_keys=["base_0_rgb"])
+    assert out.task_stage is not None
+    assert int(np.asarray(out.task_stage)[0]) == 2
+
+
 def test_pi0_model():
     key = jax.random.key(0)
     config = pi0_config.Pi0Config()
