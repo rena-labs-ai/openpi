@@ -63,6 +63,18 @@ def posemb_sincos(
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
 
 
+def masked_mean_pool(tokens, mask):
+    """Mean over the sequence axis, ignoring masked (False) positions.
+
+    tokens: float[b, s, emb]; mask: bool[b, s]. Returns float[b, emb].
+    Safe against all-masked rows (divides by a clamped count).
+    """
+    w = mask.astype(tokens.dtype)[..., None]        # [b, s, 1]
+    summed = jnp.sum(tokens * w, axis=1)            # [b, emb]
+    count = jnp.clip(jnp.sum(w, axis=1), 1.0)      # [b, 1]
+    return summed / count
+
+
 class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
