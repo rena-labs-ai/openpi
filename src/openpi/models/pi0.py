@@ -124,16 +124,23 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
+        # Stage classification head (output-only): masked mean-pool over image
+        # tokens -> MLP -> 3 logits. Outside .*llm.*/.*img.*/.*lora.* so it stays
+        # trainable under the freeze filter and is LoRA-compatible.
+        self.stage_head_in = nnx.Linear(paligemma_config.width, action_expert_config.width, rngs=rngs)
+        self.stage_head_out = nnx.Linear(action_expert_config.width, 3, rngs=rngs)
+
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
 
     @at.typecheck
     def embed_prefix(
         self, obs: _model.Observation
-    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
+    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"], int]:
         input_mask = []
         ar_mask = []
         tokens = []
+        n_img_tokens = 0
         # embed images
         for name in obs.images:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
@@ -148,6 +155,7 @@ class Pi0(_model.BaseModel):
             )
             # image tokens attend to each other
             ar_mask += [False] * image_tokens.shape[1]
+            n_img_tokens += image_tokens.shape[1]
 
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:
@@ -159,7 +167,7 @@ class Pi0(_model.BaseModel):
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
-        return tokens, input_mask, ar_mask
+        return tokens, input_mask, ar_mask, n_img_tokens
 
     @at.typecheck
     def embed_suffix(
@@ -210,7 +218,22 @@ class Pi0(_model.BaseModel):
         ar_mask = jnp.array(ar_mask)
         return tokens, input_mask, ar_mask, adarms_cond
 
+    def _forward(self, observation, x_t, time):
+        """Run one prefix+suffix transformer pass; return outputs needed for loss and stage head."""
+        prefix_tokens, prefix_mask, prefix_ar_mask, n_img_tokens = self.embed_prefix(observation)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions,
+            adarms_cond=[None, adarms_cond],
+        )
+        return prefix_out, prefix_mask, n_img_tokens, suffix_out
+
     @override
+    @at.typecheck
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
@@ -225,18 +248,35 @@ class Pi0(_model.BaseModel):
         u_t = noise - actions
 
         # one big forward pass of prefix + suffix at once
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
-        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
-        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
-        attn_mask = make_attn_mask(input_mask, ar_mask)
-        positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
-        )
+        _prefix_out, _prefix_mask, _n_img_tokens, suffix_out = self._forward(observation, x_t, time)
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
+
+    def compute_loss_and_stage(self, rng, observation, actions, *, train=False):
+        """Like compute_loss but also returns stage logits from the stage head.
+
+        Returns:
+            flow_loss: float[*b, ah] — per-(batch,horizon) MSE (same as compute_loss).
+            stage_logits: float[b, 3] — raw logits for 3-class stage prediction.
+        """
+        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        batch_shape = actions.shape[:-2]
+        noise = jax.random.normal(noise_rng, actions.shape)
+        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+        time_expanded = time[..., None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+        prefix_out, prefix_mask, n_img_tokens, suffix_out = self._forward(observation, x_t, time)
+        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+        flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        img_tokens = prefix_out[:, :n_img_tokens]
+        img_mask = prefix_mask[:, :n_img_tokens]
+        pooled = masked_mean_pool(img_tokens, img_mask)
+        h = nnx.swish(self.stage_head_in(pooled))
+        stage_logits = self.stage_head_out(h)
+        return flow_loss, stage_logits
 
     @override
     def sample_actions(
@@ -256,7 +296,7 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask, _n_img_tokens = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
         _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
