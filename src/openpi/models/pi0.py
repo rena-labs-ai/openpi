@@ -69,9 +69,9 @@ def masked_mean_pool(tokens, mask):
     tokens: float[b, s, emb]; mask: bool[b, s]. Returns float[b, emb].
     Safe against all-masked rows (divides by a clamped count).
     """
-    w = mask.astype(tokens.dtype)[..., None]        # [b, s, 1]
-    summed = jnp.sum(tokens * w, axis=1)            # [b, emb]
-    count = jnp.clip(jnp.sum(w, axis=1), 1.0)      # [b, 1]
+    w = mask.astype(tokens.dtype)[..., None]  # [b, s, 1]
+    summed = jnp.sum(tokens * w, axis=1)  # [b, emb]
+    count = jnp.clip(jnp.sum(w, axis=1), 1.0)  # [b, 1]
     return summed / count
 
 
@@ -227,7 +227,9 @@ class Pi0(_model.BaseModel):
         attn_mask = make_attn_mask(input_mask, ar_mask)
         positions = jnp.cumsum(input_mask, axis=1) - 1
         (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions,
+            [prefix_tokens, suffix_tokens],
+            mask=attn_mask,
+            positions=positions,
             adarms_cond=[None, adarms_cond],
         )
         return prefix_out, prefix_mask, n_img_tokens, suffix_out
@@ -269,7 +271,7 @@ class Pi0(_model.BaseModel):
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
         prefix_out, prefix_mask, n_img_tokens, suffix_out = self._forward(observation, x_t, time)
-        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon:])
+        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
         img_tokens = prefix_out[:, :n_img_tokens]
         img_mask = prefix_mask[:, :n_img_tokens]

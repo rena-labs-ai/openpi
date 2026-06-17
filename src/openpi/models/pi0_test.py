@@ -2,14 +2,15 @@ import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 
+from openpi.models.pi0 import masked_mean_pool
+from openpi.models.pi0 import stage_ce_and_acc
 import openpi.models.pi0_config as _pi0_config
-from openpi.models.pi0 import masked_mean_pool, stage_ce_and_acc
 
 
 def test_masked_mean_pool_ignores_masked():
     tokens = jnp.array([[[1.0, 2.0], [3.0, 4.0], [100.0, 100.0]]])  # (1, 3, 2)
     mask = jnp.array([[True, True, False]])
-    out = masked_mean_pool(tokens, mask)          # -> (1, 2)
+    out = masked_mean_pool(tokens, mask)  # -> (1, 2)
     assert jnp.allclose(out, jnp.array([[2.0, 3.0]]))  # mean of first two only
 
 
@@ -17,7 +18,7 @@ def test_masked_mean_pool_all_masked_is_safe():
     tokens = jnp.ones((1, 2, 2))
     mask = jnp.array([[False, False]])
     out = masked_mean_pool(tokens, mask)
-    assert jnp.all(jnp.isfinite(out))             # no NaN from divide-by-zero
+    assert jnp.all(jnp.isfinite(out))  # no NaN from divide-by-zero
 
 
 def test_stage_ce_perfect_prediction():

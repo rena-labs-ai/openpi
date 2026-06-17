@@ -3,7 +3,6 @@
 import flax.traverse_util as tu
 import jax
 import numpy as np
-import pytest
 
 from openpi.training.weight_loaders import _merge_params
 
@@ -29,9 +28,7 @@ def test_old_regex_drops_stage_head():
 
 def test_new_regex_backfills_stage_head_and_lora():
     """Validates that the fix regex keeps the loaded weight, backfills lora and stage_head."""
-    flat = tu.flatten_dict(
-        _merge_params(_loaded(), _ref(), missing_regex=".*lora.*|.*stage_head.*"), sep="/"
-    )
+    flat = tu.flatten_dict(_merge_params(_loaded(), _ref(), missing_regex=".*lora.*|.*stage_head.*"), sep="/")
     # Base weight kept as the real loaded array (not a ShapeDtypeStruct).
     assert "PaliGemma/layer/kernel" in flat
     assert not isinstance(flat["PaliGemma/layer/kernel"], jax.ShapeDtypeStruct)
