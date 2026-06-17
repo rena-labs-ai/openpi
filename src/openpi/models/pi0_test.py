@@ -1,7 +1,40 @@
 import flax.nnx as nnx
 import jax
+import jax.numpy as jnp
 
+from openpi.models.pi0 import masked_mean_pool
+from openpi.models.pi0 import stage_ce_and_acc
 import openpi.models.pi0_config as _pi0_config
+
+
+def test_masked_mean_pool_ignores_masked():
+    tokens = jnp.array([[[1.0, 2.0], [3.0, 4.0], [100.0, 100.0]]])  # (1, 3, 2)
+    mask = jnp.array([[True, True, False]])
+    out = masked_mean_pool(tokens, mask)  # -> (1, 2)
+    assert jnp.allclose(out, jnp.array([[2.0, 3.0]]))  # mean of first two only
+
+
+def test_masked_mean_pool_all_masked_is_safe():
+    tokens = jnp.ones((1, 2, 2))
+    mask = jnp.array([[False, False]])
+    out = masked_mean_pool(tokens, mask)
+    assert jnp.all(jnp.isfinite(out))  # no NaN from divide-by-zero
+
+
+def test_stage_ce_perfect_prediction():
+    logits = jnp.array([[10.0, -10.0, -10.0], [-10.0, 10.0, -10.0]])  # argmax 0,1
+    labels = jnp.array([0, 1], dtype=jnp.int32)
+    ce, acc = stage_ce_and_acc(logits, labels, num_classes=3)
+    assert float(acc) == 1.0
+    assert float(ce) < 1e-3
+
+
+def test_stage_ce_wrong_prediction():
+    logits = jnp.array([[-10.0, 10.0, -10.0]])  # argmax 1
+    labels = jnp.array([0], dtype=jnp.int32)
+    ce, acc = stage_ce_and_acc(logits, labels, num_classes=3)
+    assert float(acc) == 0.0
+    assert float(ce) > 1.0
 
 
 def _get_frozen_state(config: _pi0_config.Pi0Config) -> nnx.State:
