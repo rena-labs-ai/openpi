@@ -255,6 +255,17 @@ class Pi0(_model.BaseModel):
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
+    def _stage_logits_from_prefix(self, prefix_out, prefix_mask, n_img_tokens):
+        """Pool image tokens from a prefix pass and run them through the stage head.
+
+        Returns float[b, 3] raw logits for 3-class stage prediction.
+        """
+        img_tokens = prefix_out[:, :n_img_tokens]
+        img_mask = prefix_mask[:, :n_img_tokens]
+        pooled = masked_mean_pool(img_tokens, img_mask)
+        h = nnx.swish(self.stage_head_in(pooled))
+        return self.stage_head_out(h)
+
     def compute_loss_and_stage(self, rng, observation, actions, *, train=False):
         """Like compute_loss but also returns stage logits from the stage head.
 
@@ -273,22 +284,21 @@ class Pi0(_model.BaseModel):
         prefix_out, prefix_mask, n_img_tokens, suffix_out = self._forward(observation, x_t, time)
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
-        img_tokens = prefix_out[:, :n_img_tokens]
-        img_mask = prefix_mask[:, :n_img_tokens]
-        pooled = masked_mean_pool(img_tokens, img_mask)
-        h = nnx.swish(self.stage_head_in(pooled))
-        stage_logits = self.stage_head_out(h)
+        stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
         return flow_loss, stage_logits
 
-    @override
-    def sample_actions(
+    def _sample_actions_impl(
         self,
         rng: at.KeyArrayLike,
         observation: _model.Observation,
-        *,
-        num_steps: int | at.Int[at.Array, ""] = 10,
-        noise: at.Float[at.Array, "b ah ad"] | None = None,
-    ) -> _model.Actions:
+        num_steps: int | at.Int[at.Array, ""],
+        noise: at.Float[at.Array, "b ah ad"] | None,
+    ):
+        """Shared denoising loop. Returns (x_0, prefix_out, prefix_mask, n_img_tokens).
+
+        prefix_out / n_img_tokens are captured from the prefix forward pass so the
+        stage head can pool over image tokens without a second forward pass.
+        """
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
@@ -298,10 +308,12 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask, _n_img_tokens = self.embed_prefix(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask, n_img_tokens = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        (prefix_out, _), kv_cache = self.PaliGemma.llm(
+            [prefix_tokens, None], mask=prefix_attn_mask, positions=positions
+        )
 
         def step(carry):
             x_t, time = carry
@@ -343,4 +355,34 @@ class Pi0(_model.BaseModel):
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
+        return x_0, prefix_out, prefix_mask, n_img_tokens
+
+    @override
+    def sample_actions(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ) -> _model.Actions:
+        x_0, _, _, _ = self._sample_actions_impl(rng, observation, num_steps, noise)
         return x_0
+
+    def sample_actions_and_stage(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ):
+        """Like sample_actions but also returns raw stage logits from the stage head.
+
+        Returns:
+            actions: float[b, ah, ad] — sampled action sequence.
+            stage_logits: float[b, 3] — raw logits for 3-class stage prediction.
+        """
+        x_0, prefix_out, prefix_mask, n_img_tokens = self._sample_actions_impl(rng, observation, num_steps, noise)
+        stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
+        return x_0, stage_logits
