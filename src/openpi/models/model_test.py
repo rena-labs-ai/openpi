@@ -52,6 +52,23 @@ def test_pi0_model():
     assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
 
 
+def test_pi0_sample_actions_and_stage():
+    key = jax.random.key(0)
+    config = pi0_config.Pi0Config()
+    model = config.create(key)
+
+    batch_size = 2
+    obs = config.fake_obs(batch_size)
+
+    actions, stage_logits = nnx_utils.module_jit(model.sample_actions_and_stage)(key, obs, num_steps=10)
+    assert actions.shape == (batch_size, model.action_horizon, model.action_dim)
+    assert stage_logits.shape == (batch_size, 3)
+
+    # plain sample_actions is unchanged: still returns only actions
+    actions_only = nnx_utils.module_jit(model.sample_actions)(key, obs, num_steps=10)
+    assert actions_only.shape == (batch_size, model.action_horizon, model.action_dim)
+
+
 def test_pi0_lora_model():
     key = jax.random.key(0)
     config = pi0_config.Pi0Config(paligemma_variant="gemma_2b_lora")

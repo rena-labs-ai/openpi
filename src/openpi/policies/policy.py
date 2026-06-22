@@ -59,9 +59,15 @@ class Policy(BasePolicy):
             self._model = self._model.to(pytorch_device)
             self._model.eval()
             self._sample_actions = model.sample_actions
+            self._returns_stage = False
         else:
             # JAX model setup
-            self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+            if hasattr(model, "sample_actions_and_stage"):
+                self._sample_actions = nnx_utils.module_jit(model.sample_actions_and_stage)
+                self._returns_stage = True
+            else:
+                self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+                self._returns_stage = False
             self._rng = rng or jax.random.key(0)
 
     @override
@@ -95,10 +101,18 @@ class Policy(BasePolicy):
         observation = _model.Observation.from_dict(inputs)
         t3 = time.monotonic()
 
-        outputs = {
-            "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
-        }
+        if self._returns_stage:
+            actions, stage_logits = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+            outputs = {
+                "state": inputs["state"],
+                "actions": actions,
+                "stage_logits": stage_logits,
+            }
+        else:
+            outputs = {
+                "state": inputs["state"],
+                "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
+            }
         t4 = time.monotonic()
 
         if self._is_pytorch_model:
