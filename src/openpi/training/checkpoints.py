@@ -86,13 +86,37 @@ def save_state(
     checkpoint_manager.save(step, items)
 
 
+def _with_sharding(target: at.PyTree, sharding: at.PyTree) -> at.PyTree:
+    """Return `target` (a pytree of jax.ShapeDtypeStruct) with each leaf's sharding set
+    from the matching leaf of `sharding`.
+
+    Abstract restore targets produced by `jax.eval_shape` carry no sharding. Handing
+    those to Orbax makes it materialize each array fully on host and reshard on first
+    use, which stalls (and can OOM) for FSDP-sized models. Attaching the target sharding
+    lets Orbax read each shard directly onto its device.
+    """
+    return jax.tree.map(
+        lambda x, s: jax.ShapeDtypeStruct(x.shape, x.dtype, sharding=s),
+        target,
+        sharding,
+    )
+
+
 def restore_state(
     checkpoint_manager: ocp.CheckpointManager,
     state: training_utils.TrainState,
     data_loader: _data_loader.DataLoader,
     step: int | None = None,
+    *,
+    sharding: training_utils.TrainState | None = None,
 ) -> training_utils.TrainState:
     del data_loader
+
+    # When resuming an FSDP run, `state` is an abstract (sharding-less) pytree from
+    # jax.eval_shape. Stamp the target sharding onto it so Orbax restores each array
+    # straight into its shard instead of replicating it on host first (see _with_sharding).
+    if sharding is not None:
+        state = _with_sharding(state, sharding)
 
     with at.disable_typechecking():
         # Split params that can be used for inference into a separate item.
