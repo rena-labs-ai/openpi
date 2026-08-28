@@ -32,8 +32,6 @@ class WebsocketPolicyServer:
         self._host = host
         self._port = port
         self._metadata = metadata or {}
-        # Activity signal for /healthz: lets a scoring client (which marks its
-        # own requests with obs["_qc_probe"]) yield to real robot traffic.
         self._last_infer_at: float | None = None
         self._in_flight = 0
         logging.getLogger("websockets.server").setLevel(logging.INFO)
@@ -52,9 +50,7 @@ class WebsocketPolicyServer:
         ) as server:
             await server.serve_forever()
 
-    def _health_check(
-        self, connection: _server.ServerConnection, request: _server.Request
-    ) -> _server.Response | None:
+    def _health_check(self, connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:
         if request.path == "/healthz":
             body = json.dumps(
                 {
@@ -87,8 +83,7 @@ class WebsocketPolicyServer:
                 obs = _decode_jpeg_images(obs)
                 t2b = time.monotonic()
 
-                # A scoring client marks its requests so they don't count as
-                # robot activity; the marker never reaches the policy.
+                # QC probes don't count as robot activity for /healthz.
                 is_probe = bool(obs.pop("_qc_probe", False))
                 self._in_flight += 1
                 try:
