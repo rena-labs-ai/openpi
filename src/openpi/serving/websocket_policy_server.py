@@ -1,5 +1,6 @@
 import asyncio
 import http
+import json
 import logging
 import time
 import traceback
@@ -31,6 +32,10 @@ class WebsocketPolicyServer:
         self._host = host
         self._port = port
         self._metadata = metadata or {}
+        # Activity signal for /healthz: lets a scoring client (which marks its
+        # own requests with obs["_qc_probe"]) yield to real robot traffic.
+        self._last_infer_at: float | None = None
+        self._in_flight = 0
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
@@ -43,9 +48,24 @@ class WebsocketPolicyServer:
             self._port,
             compression=None,
             max_size=None,
-            process_request=_health_check,
+            process_request=self._health_check,
         ) as server:
             await server.serve_forever()
+
+    def _health_check(
+        self, connection: _server.ServerConnection, request: _server.Request
+    ) -> _server.Response | None:
+        if request.path == "/healthz":
+            body = json.dumps(
+                {
+                    "status": "ok",
+                    "last_infer_at": self._last_infer_at,
+                    "in_flight": self._in_flight,
+                }
+            )
+            return connection.respond(http.HTTPStatus.OK, body + "\n")
+        # Continue with the normal request handling.
+        return None
 
     async def _handler(self, websocket: _server.ServerConnection):
         logger.info(f"Connection from {websocket.remote_address} opened")
@@ -67,7 +87,16 @@ class WebsocketPolicyServer:
                 obs = _decode_jpeg_images(obs)
                 t2b = time.monotonic()
 
-                action = self._policy.infer(obs)
+                # A scoring client marks its requests so they don't count as
+                # robot activity; the marker never reaches the policy.
+                is_probe = bool(obs.pop("_qc_probe", False))
+                self._in_flight += 1
+                try:
+                    action = self._policy.infer(obs)
+                finally:
+                    self._in_flight -= 1
+                    if not is_probe:
+                        self._last_infer_at = time.time()
                 t3 = time.monotonic()
 
                 # Extract per-stage policy timing before packing
@@ -145,10 +174,3 @@ def _decode_jpeg_images(obs: dict) -> dict:
         else:
             logger.warning(f"Failed to decode JPEG for key '{key}'")
     return obs
-
-
-def _health_check(connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:
-    if request.path == "/healthz":
-        return connection.respond(http.HTTPStatus.OK, "OK\n")
-    # Continue with the normal request handling.
-    return None
