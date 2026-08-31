@@ -21,6 +21,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 
+import openpi.models.remat as _remat
 import openpi.training.sharding as sharding
 
 
@@ -124,11 +125,11 @@ class Encoder(nn.Module):
         out = {}
 
         if self.scan:
-            block = nn.remat(
+            block = _remat.maybe_remat(
                 Encoder1DBlock,
+                self.remat_policy,
                 prevent_cse=False,
                 static_argnums=(2,),  # 0=self, 2=deterministic
-                policy=getattr(jax.checkpoint_policies, self.remat_policy, None),
             )
             x, scan_out = nn.scan(
                 block,
