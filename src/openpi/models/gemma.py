@@ -35,6 +35,7 @@ import jax
 import jax.numpy as jnp
 
 import openpi.models.lora as lora
+import openpi.models.remat as _remat
 import openpi.shared.array_typing as at
 import openpi.training.sharding as sharding
 
@@ -346,6 +347,9 @@ class Module(nn.Module):
     dropout: float = 0.0
     dropout_bdims: tuple[int, ...] = ()  # Every float is dropped independently.
     adarms: bool = False
+    # "none" skips remat entirely; anything else names a jax.checkpoint_policies
+    # attribute. Trades activation memory for the backward pass's recompute cost.
+    remat_policy: str = "nothing_saveable"
 
     def setup(self):
         # all experts must have the same depth
@@ -356,11 +360,11 @@ class Module(nn.Module):
             embed_dim=self.configs[0].width,  # embedder for first expert only
             name="embedder",
         )
-        block_cls = nn.remat(
+        block_cls = _remat.maybe_remat(
             Block,
+            self.remat_policy,
             prevent_cse=False,
             static_argnums=(5,),  # 0=self, 6=deterministic
-            policy=jax.checkpoint_policies.nothing_saveable,
         )
         self.layers = nn.scan(
             block_cls,
