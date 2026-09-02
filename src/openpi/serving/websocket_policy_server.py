@@ -2,6 +2,7 @@ import asyncio
 import http
 import json
 import logging
+import os
 import time
 import traceback
 
@@ -13,6 +14,13 @@ import websockets.asyncio.server as _server
 import websockets.frames
 
 logger = logging.getLogger(__name__)
+
+# rena-training's quality gate scores recorded episodes against this server
+# between robot sessions. Its probes wait this long past a robot's last
+# inference; /healthz publishes the value so the gate can check it enforces.
+# The clock is server-wide, not per model: one GPU serves the whole set, so a
+# robot on any model holds probes off all of them.
+QC_HOLD_SECONDS = float(os.environ.get("RENA_QC_HOLD_SECONDS", "1800"))
 
 
 def resolve_model_path(path: str, ids, default: str) -> str | None:
@@ -109,6 +117,7 @@ class WebsocketPolicyServer:
                 "status": "ok",
                 "last_infer_at": self._last_infer_at,
                 "in_flight": self._in_flight,
+                "qc_hold_seconds": QC_HOLD_SECONDS,
             }
             if self._policies is not None:
                 body["models"] = list(self._policies)
@@ -123,6 +132,12 @@ class WebsocketPolicyServer:
             )
         # Continue with the normal websocket handshake.
         return None
+
+    def probe_hold_left(self) -> float:
+        """Seconds until QC probes are allowed again."""
+        if self._last_infer_at is None:
+            return 0.0
+        return max(0.0, QC_HOLD_SECONDS - (time.time() - self._last_infer_at))
 
     async def _handler(self, websocket: _server.ServerConnection):
         logger.info(f"Connection from {websocket.remote_address} opened")
@@ -159,6 +174,11 @@ class WebsocketPolicyServer:
 
                 # QC probes don't count as robot activity for /healthz.
                 is_probe = bool(obs.pop("_qc_probe", False))
+                hold_left = self.probe_hold_left() if is_probe else 0.0
+                if hold_left > 0:
+                    logger.info(f"QC probe refused: {hold_left:.0f}s of robot hold left")
+                    await websocket.send(packer.pack({"_qc_refused": True, "retry_after": hold_left}))
+                    continue
                 self._in_flight += 1
                 try:
                     action = policy.infer(obs)
