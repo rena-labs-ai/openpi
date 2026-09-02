@@ -1,6 +1,8 @@
 import dataclasses
 import enum
+import json
 import logging
+import pathlib
 import socket
 
 import tyro
@@ -8,6 +10,7 @@ import tyro
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
 from openpi.serving import websocket_policy_server
+from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
 
 
@@ -28,6 +31,18 @@ class Checkpoint:
     config: str
     # Checkpoint directory (e.g., "checkpoints/pi0_aloha_sim/exp/10000").
     dir: str
+
+
+@dataclasses.dataclass
+class ModelSet:
+    """Load several checkpoints of one training config from a models.json
+    manifest: {"models": [{"id", "label", "dir"}, ...], "default": "<id>"}.
+    The model is selected per connection (ws path /m/<id>)."""
+
+    # Training config name shared by every checkpoint in the set.
+    config: str
+    # Path to the models.json manifest.
+    manifest: str
 
 
 @dataclasses.dataclass
@@ -52,7 +67,7 @@ class Args:
     record: bool = False
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
-    policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
+    policy: Checkpoint | ModelSet | Default = dataclasses.field(default_factory=Default)
 
 
 # Default checkpoints that should be used for each environment.
@@ -96,17 +111,58 @@ def create_policy(args: Args) -> _policy.Policy:
             return create_default_policy(args.env, default_prompt=args.default_prompt)
 
 
+def checkpoint_norm_stats(ckpt_dir: str) -> dict:
+    """Norm stats from the checkpoint's own assets dir. The shared config's
+    asset_id names only ONE model's assets, so each sibling checkpoint must
+    resolve its own (each self-contained prefix holds exactly one asset id)."""
+    assets = pathlib.Path(ckpt_dir) / "assets"
+    ids = [p.name for p in assets.iterdir() if p.is_dir()]
+    if len(ids) != 1:
+        raise ValueError(f"expected exactly one asset id under {assets}, got {ids}")
+    return _checkpoints.load_norm_stats(assets, ids[0])
+
+
+def create_model_set(args: Args) -> tuple[dict[str, _policy.Policy], str, dict[str, str]]:
+    """(policies by id, default id, labels by id) from a models.json manifest."""
+    manifest = json.loads(pathlib.Path(args.policy.manifest).read_text())
+    train_config = _config.get_config(args.policy.config)
+    policies: dict[str, _policy.Policy] = {}
+    labels: dict[str, str] = {}
+    for m in manifest["models"]:
+        logging.info("Loading model %s from %s", m["id"], m["dir"])
+        policies[m["id"]] = _policy_config.create_trained_policy(
+            train_config,
+            m["dir"],
+            default_prompt=args.default_prompt,
+            norm_stats=checkpoint_norm_stats(m["dir"]),
+        )
+        labels[m["id"]] = m.get("label") or m["id"]
+    return policies, manifest["default"], labels
+
+
 def main(args: Args) -> None:
+    hostname = socket.gethostname()
+    local_ip = socket.gethostbyname(hostname)
+    logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
+
+    if isinstance(args.policy, ModelSet):
+        policies, default, labels = create_model_set(args)
+        server = websocket_policy_server.WebsocketPolicyServer(
+            policies=policies,
+            default=default,
+            labels=labels,
+            host="0.0.0.0",
+            port=args.port,
+        )
+        server.serve_forever()
+        return
+
     policy = create_policy(args)
     policy_metadata = policy.metadata
 
     # Record the policy's behavior.
     if args.record:
         policy = _policy.PolicyRecorder(policy, "policy_records")
-
-    hostname = socket.gethostname()
-    local_ip = socket.gethostbyname(hostname)
-    logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
 
     server = websocket_policy_server.WebsocketPolicyServer(
         policy=policy,
