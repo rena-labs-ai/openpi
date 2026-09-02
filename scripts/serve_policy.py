@@ -36,13 +36,13 @@ class Checkpoint:
 @dataclasses.dataclass
 class ModelSet:
     """Load several checkpoints of one training config from a models.json
-    manifest: {"models": [{"id", "label", "dir"}, ...], "default": "<id>"}.
+    roster: {"models": [{"id", "label", "dir"}, ...], "default": "<id>"}.
     The model is selected per connection (ws path /m/<id>)."""
 
     # Training config name shared by every checkpoint in the set.
     config: str
-    # Path to the models.json manifest.
-    manifest: str
+    # Path to the models.json roster.
+    roster: str
 
 
 @dataclasses.dataclass
@@ -123,12 +123,12 @@ def checkpoint_norm_stats(ckpt_dir: str) -> dict:
 
 
 def create_model_set(args: Args) -> tuple[dict[str, _policy.Policy], str, dict[str, str]]:
-    """(policies by id, default id, labels by id) from a models.json manifest."""
-    manifest = json.loads(pathlib.Path(args.policy.manifest).read_text())
+    """(policies by id, default id, labels by id) from a models.json roster."""
+    roster = json.loads(pathlib.Path(args.policy.roster).read_text())
     train_config = _config.get_config(args.policy.config)
     policies: dict[str, _policy.Policy] = {}
     labels: dict[str, str] = {}
-    for m in manifest["models"]:
+    for m in roster["models"]:
         logging.info("Loading model %s from %s", m["id"], m["dir"])
         policies[m["id"]] = _policy_config.create_trained_policy(
             train_config,
@@ -137,7 +137,7 @@ def create_model_set(args: Args) -> tuple[dict[str, _policy.Policy], str, dict[s
             norm_stats=checkpoint_norm_stats(m["dir"]),
         )
         labels[m["id"]] = m.get("label") or m["id"]
-    return policies, manifest["default"], labels
+    return policies, roster["default"], labels
 
 
 def main(args: Args) -> None:
