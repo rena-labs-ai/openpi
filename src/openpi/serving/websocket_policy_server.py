@@ -15,20 +15,56 @@ import websockets.frames
 logger = logging.getLogger(__name__)
 
 
-class WebsocketPolicyServer:
-    """Serves a policy using the websocket protocol. See websocket_client_policy.py for a client implementation.
+def resolve_model_path(path: str, ids, default: str) -> str | None:
+    """Model id selected by a websocket request path, or None to reject.
 
-    Currently only implements the `load` and `infer` methods.
+    A bare "/" serves the default; "/m/<id>" selects (ids contain slashes:
+    "<exp_name>/<step>"). Anything else — including an unknown id — is a
+    rejection, never a silent fallback.
+    """
+    if path in ("", "/"):
+        return default
+    if path.startswith("/m/"):
+        rid = path[3:]
+        if rid in ids:
+            return rid
+    return None
+
+
+class WebsocketPolicyServer:
+    """Serves one or more policies using the websocket protocol. See
+    websocket_client_policy.py for a client implementation.
+
+    Single-policy form: pass `policy` (+ optional `metadata`) — every
+    connection gets that policy, whatever its path; `/models` does not exist.
+
+    Multi-policy form: pass `policies` (id -> policy, insertion-ordered),
+    `default` (an id in `policies`) and optional `labels` (id -> display
+    label). The model is chosen per connection by request path (see
+    `resolve_model_path`); an unknown id is rejected with HTTP 404 before the
+    upgrade. `GET /models` lists the catalog, `/healthz` reports the loaded
+    ids, and each connection's metadata frame carries the resolved `model`.
     """
 
     def __init__(
         self,
-        policy: _base_policy.BasePolicy,
+        policy: _base_policy.BasePolicy | None = None,
         host: str = "0.0.0.0",
         port: int | None = None,
         metadata: dict | None = None,
+        *,
+        policies: dict[str, _base_policy.BasePolicy] | None = None,
+        default: str | None = None,
+        labels: dict[str, str] | None = None,
     ) -> None:
+        if (policy is None) == (policies is None):
+            raise ValueError("pass exactly one of `policy` or `policies`")
+        if policies is not None and default not in policies:
+            raise ValueError(f"default {default!r} not in policies")
         self._policy = policy
+        self._policies = policies
+        self._default = default
+        self._labels = labels or {}
         self._host = host
         self._port = port
         self._metadata = metadata or {}
@@ -46,28 +82,66 @@ class WebsocketPolicyServer:
             self._port,
             compression=None,
             max_size=None,
-            process_request=self._health_check,
+            process_request=self._process_request,
         ) as server:
             await server.serve_forever()
 
-    def _health_check(self, connection: _server.ServerConnection, request: _server.Request) -> _server.Response | None:
+    def _catalog(self) -> dict:
+        return {
+            "models": [{"id": mid, "label": self._labels.get(mid, mid)} for mid in self._policies],
+            "default": self._default,
+        }
+
+    def _connection_policy(self, path: str):
+        """(model id, policy) for a connection path; (None, None) = reject."""
+        if self._policies is None:
+            return None, self._policy
+        mid = resolve_model_path(path, self._policies.keys(), self._default)
+        if mid is None:
+            return None, None
+        return mid, self._policies[mid]
+
+    def _process_request(
+        self, connection: _server.ServerConnection, request: _server.Request
+    ) -> _server.Response | None:
         if request.path == "/healthz":
-            body = json.dumps(
-                {
-                    "status": "ok",
-                    "last_infer_at": self._last_infer_at,
-                    "in_flight": self._in_flight,
-                }
+            body = {
+                "status": "ok",
+                "last_infer_at": self._last_infer_at,
+                "in_flight": self._in_flight,
+            }
+            if self._policies is not None:
+                body["models"] = list(self._policies)
+                body["default"] = self._default
+            return connection.respond(http.HTTPStatus.OK, json.dumps(body) + "\n")
+        if request.path == "/models" and self._policies is not None:
+            return connection.respond(http.HTTPStatus.OK, json.dumps(self._catalog()) + "\n")
+        if self._connection_policy(request.path)[1] is None:
+            return connection.respond(
+                http.HTTPStatus.NOT_FOUND,
+                json.dumps({"error": f"unknown model path: {request.path}"}) + "\n",
             )
-            return connection.respond(http.HTTPStatus.OK, body + "\n")
-        # Continue with the normal request handling.
+        # Continue with the normal websocket handshake.
         return None
 
     async def _handler(self, websocket: _server.ServerConnection):
         logger.info(f"Connection from {websocket.remote_address} opened")
         packer = msgpack_numpy.Packer()
 
-        await websocket.send(packer.pack(self._metadata))
+        model_id, policy = self._connection_policy(websocket.request.path)
+        if policy is None:  # raced a set change since process_request
+            await websocket.close(code=websockets.frames.CloseCode.POLICY_VIOLATION)
+            return
+        if self._policies is None:
+            metadata = self._metadata
+        else:
+            metadata = {
+                **(policy.metadata or {}),
+                "model": model_id,
+                "default": self._default,
+            }
+            logger.info(f"Connection bound to model {model_id}")
+        await websocket.send(packer.pack(metadata))
 
         prev_total_time = None
         req_count = 0
@@ -87,7 +161,7 @@ class WebsocketPolicyServer:
                 is_probe = bool(obs.pop("_qc_probe", False))
                 self._in_flight += 1
                 try:
-                    action = self._policy.infer(obs)
+                    action = policy.infer(obs)
                 finally:
                     self._in_flight -= 1
                     if not is_probe:
