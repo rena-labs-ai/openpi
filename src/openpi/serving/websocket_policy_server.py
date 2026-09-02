@@ -88,10 +88,7 @@ class WebsocketPolicyServer:
 
     def _catalog(self) -> dict:
         return {
-            "models": [
-                {"id": mid, "label": self._labels.get(mid, mid)}
-                for mid in self._policies
-            ],
+            "models": [{"id": mid, "label": self._labels.get(mid, mid)} for mid in self._policies],
             "default": self._default,
         }
 
@@ -118,9 +115,7 @@ class WebsocketPolicyServer:
                 body["default"] = self._default
             return connection.respond(http.HTTPStatus.OK, json.dumps(body) + "\n")
         if request.path == "/models" and self._policies is not None:
-            return connection.respond(
-                http.HTTPStatus.OK, json.dumps(self._catalog()) + "\n"
-            )
+            return connection.respond(http.HTTPStatus.OK, json.dumps(self._catalog()) + "\n")
         if self._connection_policy(request.path)[1] is None:
             return connection.respond(
                 http.HTTPStatus.NOT_FOUND,
