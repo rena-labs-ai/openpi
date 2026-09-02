@@ -15,11 +15,7 @@ import websockets.frames
 
 logger = logging.getLogger(__name__)
 
-# rena-training's quality gate scores recorded episodes against this server
-# between robot sessions. Its probes wait this long past a robot's last
-# inference; /healthz publishes the value so the gate can check it enforces.
-# The clock is server-wide, not per model: one GPU serves the whole set, so a
-# robot on any model holds probes off all of them.
+# How long rena-training's quality-gate probes wait past a robot's last inference.
 QC_HOLD_SECONDS = float(os.environ.get("RENA_QC_HOLD_SECONDS", "1800"))
 
 
