@@ -207,7 +207,6 @@ def test_a_blocking_inference_leaves_the_event_loop_free():
         await asyncio.to_thread(policy.entered.wait, 5)
         assert policy.entered.is_set()
 
-        # The loop must still run other work while infer is in flight.
         ticks = 0
         for _ in range(3):
             await asyncio.sleep(0)
