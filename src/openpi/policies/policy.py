@@ -70,6 +70,17 @@ class Policy(BasePolicy):
                 self._returns_stage = False
             self._rng = rng or jax.random.key(0)
 
+    def warm(self, observation: _model.Observation) -> None:
+        """Compile sample_actions now rather than inside the first request.
+
+        The observation must already be post-transform (a model config's
+        ``fake_obs()``): the jit cache keys on those shapes, not a raw schema.
+        """
+        if self._is_pytorch_model:
+            return
+        self._rng, sample_rng = jax.random.split(self._rng)
+        jax.block_until_ready(self._sample_actions(sample_rng, observation, **self._sample_kwargs))
+
     @override
     def infer(self, obs: dict, *, noise: np.ndarray | None = None) -> dict:  # type: ignore[misc]
         t0 = time.monotonic()

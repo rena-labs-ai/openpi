@@ -1,9 +1,13 @@
+from typing import ClassVar
+
 import flax.nnx as nnx
+import jax
 import jax.numpy as jnp
 import numpy as np
 from openpi_client import action_chunk_broker
 import pytest
 
+from openpi.models import model as _model
 from openpi.policies import aloha_policy
 from openpi.policies import policy_config as _policy_config
 from openpi.policies.policy import Policy
@@ -45,6 +49,35 @@ def _example():
         "image_mask": {"base_0_rgb": np.ones((), bool)},
         "state": np.zeros((7,), np.float32),
     }
+
+
+class _CountingStageModel(_FakeStageModel):
+    """Counts reaching the model, so a warm-up can be told from a no-op."""
+
+    calls: ClassVar[int] = 0
+
+    def sample_actions_and_stage(self, rng, observation, *, num_steps=10, noise=None):
+        type(self).calls += 1
+        return super().sample_actions_and_stage(rng, observation, num_steps=num_steps, noise=noise)
+
+
+def _batched_observation():
+    """`_example()` shaped the way Policy.infer hands it to the model."""
+    inputs = jax.tree.map(lambda x: jnp.asarray(x)[np.newaxis, ...], _example())
+    return _model.Observation.from_dict(inputs)
+
+
+def test_warm_compiles_sampling_before_any_request_arrives():
+    """Sampling must have run once before any request arrives."""
+    _CountingStageModel.calls = 0
+    policy = Policy(_CountingStageModel())
+    assert _CountingStageModel.calls == 0
+
+    policy.warm(_batched_observation())
+    assert _CountingStageModel.calls >= 1
+
+    out = policy.infer(_example())
+    assert out["actions"].shape == (2, 7)
 
 
 def test_infer_emits_stage_logits_when_model_supports_it():

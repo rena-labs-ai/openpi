@@ -1,5 +1,6 @@
 import asyncio
 import json
+import threading
 import time
 from typing import ClassVar
 
@@ -179,3 +180,48 @@ def test_the_hold_is_server_wide_across_a_model_set():
     server._last_infer_at = time.time()  # noqa: SLF001
 
     assert server.probe_hold_left() > 0
+
+
+class _BlockingPolicy:
+    """Blocks in infer until released, the way a cold jit compile does."""
+
+    metadata: ClassVar[dict] = {}
+
+    def __init__(self):
+        self.entered = threading.Event()
+        self.release = threading.Event()
+
+    def infer(self, obs):
+        self.entered.set()
+        self.release.wait(5)
+        return {"actions": [0.0]}
+
+
+def test_a_blocking_inference_leaves_the_event_loop_free():
+    """The loop must keep running while an inference is in flight."""
+    policy = _BlockingPolicy()
+    server = WebsocketPolicyServer(policy=policy, port=0)
+
+    async def scenario():
+        handler = asyncio.ensure_future(server._handler(_Socket([{"prompt": "p"}])))  # noqa: SLF001
+        await asyncio.to_thread(policy.entered.wait, 5)
+        assert policy.entered.is_set()
+
+        # The loop must still run other work while infer is in flight.
+        ticks = 0
+        for _ in range(3):
+            await asyncio.sleep(0)
+            ticks += 1
+        assert ticks == 3
+        assert server._in_flight == 1  # noqa: SLF001
+
+        policy.release.set()
+        await handler
+
+    asyncio.run(scenario())
+
+
+def test_inferences_stay_serialized_on_one_worker():
+    """One worker keeps the ordering a direct call had."""
+    server = WebsocketPolicyServer(policy=_CountingPolicy(), port=0)
+    assert server._executor._max_workers == 1  # noqa: SLF001

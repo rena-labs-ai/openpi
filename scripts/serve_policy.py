@@ -4,6 +4,7 @@ import json
 import logging
 import pathlib
 import socket
+import time
 
 import tyro
 
@@ -137,7 +138,25 @@ def create_model_set(args: Args) -> tuple[dict[str, _policy.Policy], str, dict[s
             norm_stats=checkpoint_norm_stats(m["dir"]),
         )
         labels[m["id"]] = m.get("label") or m["id"]
-    return policies, roster["default"], labels
+    default = roster["default"]
+    warm_default(policies[default], default, train_config)
+    return policies, default, labels
+
+
+def warm_default(policy: _policy.Policy, model_id: str, train_config) -> None:
+    """Compile the default model before the port binds.
+
+    Only the default: warming every model would add each compile to a restart's
+    serving gap, and the rest compile on first use without blocking the loop.
+    Best-effort, since raising here would leave nothing serving at all.
+    """
+    started = time.monotonic()
+    try:
+        policy.warm(train_config.model.fake_obs())
+    except Exception:
+        logging.exception("Warm-up of %s failed; it compiles on first request", model_id)
+    else:
+        logging.info("Warmed %s in %.0fs", model_id, time.monotonic() - started)
 
 
 def main(args: Args) -> None:
