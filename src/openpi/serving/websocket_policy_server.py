@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import http
 import json
 import logging
@@ -74,6 +75,11 @@ class WebsocketPolicyServer:
         self._metadata = metadata or {}
         self._last_infer_at: float | None = None
         self._in_flight = 0
+        # One worker keeps inferences serialized on the single GPU exactly as a
+        # direct call did, while the loop stays free to answer keepalive pings: a
+        # policy's first request compiles for ~80s, and on the loop thread that
+        # silence is what the client closes the connection over.
+        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="infer")
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
@@ -177,7 +183,7 @@ class WebsocketPolicyServer:
                     continue
                 self._in_flight += 1
                 try:
-                    action = policy.infer(obs)
+                    action = await asyncio.get_running_loop().run_in_executor(self._executor, policy.infer, obs)
                 finally:
                     self._in_flight -= 1
                     if not is_probe:
