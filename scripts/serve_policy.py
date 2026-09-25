@@ -10,7 +10,7 @@ import tyro
 
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
-from openpi.serving import model_labels
+from openpi.serving import served_model
 from openpi.serving import websocket_policy_server
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
@@ -130,19 +130,17 @@ def create_model_set(args: Args) -> tuple[dict[str, _policy.Policy], str, dict[s
     train_config = _config.get_config(args.policy.config)
     policies: dict[str, _policy.Policy] = {}
     labels: dict[str, str] = {}
-    for m in roster["models"]:
-        logging.info("Loading model %s from %s", m["id"], m["dir"])
-        policies[m["id"]] = _policy_config.create_trained_policy(
+    for entry in roster["models"]:
+        model = served_model.ServedModel.from_roster(entry)
+        logging.info("Loading model %s from %s", model.id, model.dir)
+        policies[model.id] = _policy_config.create_trained_policy(
             train_config,
-            m["dir"],
+            model.dir,
             default_prompt=args.default_prompt,
-            norm_stats=checkpoint_norm_stats(m["dir"]),
+            norm_stats=checkpoint_norm_stats(model.dir),
         )
-        # "v22 · Sep 24": the picker otherwise cannot tell which model came
-        # out of last night's run. No date is added when orbax recorded none.
-        trained_on = model_labels.checkpoint_trained_on(m["dir"])
-        labels[m["id"]] = model_labels.dated_label(m.get("label") or m["id"], trained_on)
-        logging.info("Model %s trained on %s", m["id"], trained_on or "an unknown date")
+        labels[model.id] = model.label()
+        logging.info("Model %s labelled %r", model.id, labels[model.id])
     default = roster["default"]
     warm_default(policies[default], default, train_config)
     return policies, default, labels
