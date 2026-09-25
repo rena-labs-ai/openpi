@@ -140,7 +140,12 @@ def create_model_set(args: Args) -> tuple[dict[str, _policy.Policy], str, dict[s
             norm_stats=checkpoint_norm_stats(model.dir),
         )
         labels[model.id] = model.label()
-        logging.info("Model %s labelled %r", model.id, labels[model.id])
+        logging.info(
+            "Model %s labelled %r, trained on %s",
+            model.id,
+            labels[model.id],
+            model.trained_on() or "an unknown date",
+        )
     default = roster["default"]
     warm_default(policies[default], default, train_config)
     return policies, default, labels
