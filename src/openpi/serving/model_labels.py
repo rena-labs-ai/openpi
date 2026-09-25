@@ -40,13 +40,20 @@ def checkpoint_trained_on(
     if not isinstance(meta, dict):
         return None
     # commit is when the step became durable; init, when it started writing.
-    # Either names the same training run, so init stands in when commit is absent.
-    for key in ("commit_timestamp_nsecs", "init_timestamp_nsecs"):
-        nsecs = meta.get(key)
-        if isinstance(nsecs, int) and not isinstance(nsecs, bool) and nsecs > 0:
-            moment = datetime.datetime.fromtimestamp(nsecs / 1e9, tz=datetime.UTC)
-            return moment.astimezone(tz).date()
-    return None
+    # Both name the same training run, so init stands in when commit is absent
+    # — but only then. A commit field that is present and malformed means the
+    # file is not trustworthy, and its other field would be a guess.
+    commit = meta.get("commit_timestamp_nsecs")
+    nsecs = meta.get("init_timestamp_nsecs") if commit is None else commit
+    if not isinstance(nsecs, int) or isinstance(nsecs, bool) or nsecs <= 0:
+        return None
+    try:
+        moment = datetime.datetime.fromtimestamp(nsecs / 1e9, tz=datetime.UTC)
+        return moment.astimezone(tz).date()
+    except (OverflowError, OSError, ValueError):
+        # A positive int datetime cannot represent. Raising here would stop the
+        # server from starting over a label.
+        return None
 
 
 def dated_label(label: str, trained_on: datetime.date | None) -> str:

@@ -90,6 +90,38 @@ def test_never_guesses_a_date_from_metadata_it_cannot_read(tmp_path, meta):
     assert model_labels.checkpoint_trained_on(step, tz=UTC) is None
 
 
+@pytest.mark.parametrize("nsecs", [10**25, 10**30])
+def test_an_out_of_range_timestamp_is_no_date_rather_than_a_crash(tmp_path, nsecs):
+    # Positive and an int, so it passes the type checks, but datetime cannot
+    # represent it — JSON has no int64 ceiling, and anything orbax itself wrote
+    # (int64 nanoseconds, so at most April 2262) is in range. Raising here
+    # stops the server from starting at all.
+    step = _write_meta(tmp_path / "step", {"commit_timestamp_nsecs": nsecs})
+
+    assert model_labels.checkpoint_trained_on(step, tz=UTC) is None
+
+
+@pytest.mark.parametrize("bad_commit", ["not a number", -1, 0, True, 1.5])
+def test_a_malformed_commit_time_is_not_papered_over_with_the_init_time(tmp_path, bad_commit):
+    # init stands in only when commit is absent. A commit field that is there
+    # but wrong means the file is not trustworthy, and a date from its other
+    # field would be a guess presented as a fact.
+    started = datetime.datetime(2026, 9, 23, 23, 0, tzinfo=UTC)
+    step = _write_meta(
+        tmp_path / "step",
+        {"commit_timestamp_nsecs": bad_commit, "init_timestamp_nsecs": _nsecs(started)},
+    )
+
+    assert model_labels.checkpoint_trained_on(step, tz=UTC) is None
+
+
+def test_init_stands_in_when_commit_is_missing_entirely(tmp_path):
+    started = datetime.datetime(2026, 9, 23, 23, 0, tzinfo=UTC)
+    step = _write_meta(tmp_path / "step", {"init_timestamp_nsecs": _nsecs(started)})
+
+    assert model_labels.checkpoint_trained_on(step, tz=UTC) == datetime.date(2026, 9, 23)
+
+
 def test_a_missing_directory_is_no_date_rather_than_an_error(tmp_path):
     # Raising here would take the whole model set down with it at startup.
     assert model_labels.checkpoint_trained_on(tmp_path / "gone", tz=UTC) is None
