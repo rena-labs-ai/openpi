@@ -1,13 +1,18 @@
-"""Display labels for the multi-model catalog: the roster's label and the day
-the checkpoint was trained.
+"""One model of a multi-model catalog, and how the picker labels it.
 
 The robot's model picker listed "v21" and "v22" with nothing to say which one
 came out of last night's training run. The day is read from the checkpoint
 itself, so it cannot drift from what is actually being served.
+
+`ServedModel` rather than `Model`: in this repo "model" is the network
+(`openpi.models.model.BaseModel`), and `ServedModel` is the name the rest of the
+stack already gives this entry — rena_msgs, rena-control's catalog and
+rena-training's promotion all call it that.
 """
 
 from __future__ import annotations
 
+import dataclasses
 import datetime
 import json
 import pathlib
@@ -62,3 +67,31 @@ def dated_label(label: str, trained_on: datetime.date | None) -> str:
     if trained_on is None:
         return label
     return f"{label} · {trained_on:%b} {trained_on.day}"
+
+
+@dataclasses.dataclass(frozen=True)
+class ServedModel:
+    """One entry of a models.json roster: {"id", "label", "dir"}."""
+
+    # "<exp_name>/<step>", the selection key the robot and the app hold.
+    id: str
+    # The trained checkpoint directory this model is loaded from.
+    dir: str
+    # The roster's own name for it, usually the version ("v22"); None when the
+    # roster gave none.
+    name: str | None = None
+
+    @classmethod
+    def from_roster(cls, entry: dict) -> ServedModel:
+        """From one roster entry. A missing id or dir is a broken roster and
+        raises; a missing or empty label only costs the version name."""
+        return cls(id=entry["id"], dir=entry["dir"], name=entry.get("label") or None)
+
+    def trained_on(self, tz: datetime.tzinfo | None = None) -> datetime.date | None:
+        """The day this model's checkpoint was committed; see checkpoint_trained_on."""
+        return checkpoint_trained_on(self.dir, tz)
+
+    def label(self, tz: datetime.tzinfo | None = None) -> str:
+        """What the picker shows: "v22 · Sep 24", or the id when the roster
+        named nothing, with no date when the checkpoint recorded none."""
+        return dated_label(self.name or self.id, self.trained_on(tz))
