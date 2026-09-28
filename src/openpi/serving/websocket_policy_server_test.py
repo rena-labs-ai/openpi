@@ -25,7 +25,12 @@ class _StubPolicy:
 
 def _multi():
     policies = {mid: _StubPolicy() for mid in ("exp_v14/70000", "exp_v13/70000")}
-    return WebsocketPolicyServer(policies=policies, default="exp_v14/70000", labels={"exp_v14/70000": "v14"})
+    return WebsocketPolicyServer(
+        policies=policies,
+        default="exp_v14/70000",
+        labels={"exp_v14/70000": "v14"},
+        delivered_at={"exp_v14/70000": "2026-09-24T06:15:00+00:00"},
+    )
 
 
 def test_bare_path_serves_default():
@@ -58,11 +63,23 @@ def test_constructor_requires_default_in_policies():
 def test_catalog_lists_ids_with_labels_and_default():
     assert _multi()._catalog() == {  # noqa: SLF001
         "models": [
-            {"id": "exp_v14/70000", "label": "v14"},
-            {"id": "exp_v13/70000", "label": "exp_v13/70000"},
+            {"id": "exp_v14/70000", "label": "v14", "delivered_at": "2026-09-24T06:15:00+00:00"},
+            # No delivery time in the roster: null, never a guessed one.
+            {"id": "exp_v13/70000", "label": "exp_v13/70000", "delivered_at": None},
         ],
         "default": "exp_v14/70000",
     }
+
+
+def test_the_catalog_passes_the_instant_through_unformatted():
+    # The whole point of carrying it: the serving host must not decide which
+    # day this is. The client formats it in the viewer's zone.
+    server = WebsocketPolicyServer(
+        policies={"a/1": _StubPolicy()},
+        default="a/1",
+        delivered_at={"a/1": "2026-09-25T03:00:00+00:00"},
+    )
+    assert server._catalog()["models"][0]["delivered_at"] == "2026-09-25T03:00:00+00:00"  # noqa: SLF001
 
 
 def test_connection_policy_routes_and_rejects():
