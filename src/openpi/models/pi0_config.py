@@ -31,6 +31,12 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    # Activation rematerialization, per tower. "none" skips remat; any other value
+    # names a jax.checkpoint_policies attribute. The towers are separate knobs
+    # because they differ in depth, sequence length and activation width, so the
+    # memory/recompute trade lands differently on each.
+    remat_policy: str = "nothing_saveable"
+    siglip_remat_policy: str = "nothing_saveable"
 
     def __post_init__(self):
         if self.max_token_len is None:
