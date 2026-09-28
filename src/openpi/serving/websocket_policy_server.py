@@ -44,8 +44,10 @@ class WebsocketPolicyServer:
     connection gets that policy, whatever its path; `/models` does not exist.
 
     Multi-policy form: pass `policies` (id -> policy, insertion-ordered),
-    `default` (an id in `policies`) and optional `labels` (id -> display
-    label). The model is chosen per connection by request path (see
+    `default` (an id in `policies`), optional `labels` (id -> display label)
+    and optional `delivered_at` (id -> UTC ISO 8601 of when that model was
+    delivered, for a client to render in its own zone). The model is chosen
+    per connection by request path (see
     `resolve_model_path`); an unknown id is rejected with HTTP 404 before the
     upgrade. `GET /models` lists the catalog, `/healthz` reports the loaded
     ids, and each connection's metadata frame carries the resolved `model`.
@@ -61,6 +63,7 @@ class WebsocketPolicyServer:
         policies: dict[str, _base_policy.BasePolicy] | None = None,
         default: str | None = None,
         labels: dict[str, str] | None = None,
+        delivered_at: dict[str, str | None] | None = None,
     ) -> None:
         if (policy is None) == (policies is None):
             raise ValueError("pass exactly one of `policy` or `policies`")
@@ -70,6 +73,7 @@ class WebsocketPolicyServer:
         self._policies = policies
         self._default = default
         self._labels = labels or {}
+        self._delivered_at = delivered_at or {}
         self._host = host
         self._port = port
         self._metadata = metadata or {}
@@ -97,8 +101,18 @@ class WebsocketPolicyServer:
             await server.serve_forever()
 
     def _catalog(self) -> dict:
+        # delivered_at travels as the instant the roster recorded, never a
+        # formatted day: which day it falls on depends on the reader's zone,
+        # and this host's zone is nobody's. null when the roster had none.
         return {
-            "models": [{"id": mid, "label": self._labels.get(mid, mid)} for mid in self._policies],
+            "models": [
+                {
+                    "id": mid,
+                    "label": self._labels.get(mid, mid),
+                    "delivered_at": self._delivered_at.get(mid),
+                }
+                for mid in self._policies
+            ],
             "default": self._default,
         }
 

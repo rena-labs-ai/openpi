@@ -37,7 +37,8 @@ class Checkpoint:
 @dataclasses.dataclass
 class ModelSet:
     """Load several checkpoints of one training config from a models.json
-    roster: {"models": [{"id", "label", "dir"}, ...], "default": "<id>"}.
+    roster: {"models": [{"id", "label", "delivered_at", "dir"}, ...],
+    "default": "<id>"}.
     The model is selected per connection (ws path /m/<id>)."""
 
     # Training config name shared by every checkpoint in the set.
@@ -123,12 +124,15 @@ def checkpoint_norm_stats(ckpt_dir: str) -> dict:
     return _checkpoints.load_norm_stats(assets, ids[0])
 
 
-def create_model_set(args: Args) -> tuple[dict[str, _policy.Policy], str, dict[str, str]]:
-    """(policies by id, default id, labels by id) from a models.json roster."""
+def create_model_set(
+    args: Args,
+) -> tuple[dict[str, _policy.Policy], str, dict[str, str], dict[str, str | None]]:
+    """(policies, default id, labels, delivered_at) from a models.json roster."""
     roster = json.loads(pathlib.Path(args.policy.roster).read_text())
     train_config = _config.get_config(args.policy.config)
     policies: dict[str, _policy.Policy] = {}
     labels: dict[str, str] = {}
+    delivered_at: dict[str, str | None] = {}
     for m in roster["models"]:
         logging.info("Loading model %s from %s", m["id"], m["dir"])
         policies[m["id"]] = _policy_config.create_trained_policy(
@@ -138,9 +142,10 @@ def create_model_set(args: Args) -> tuple[dict[str, _policy.Policy], str, dict[s
             norm_stats=checkpoint_norm_stats(m["dir"]),
         )
         labels[m["id"]] = m.get("label") or m["id"]
+        delivered_at[m["id"]] = m.get("delivered_at")
     default = roster["default"]
     warm_default(policies[default], default, train_config)
-    return policies, default, labels
+    return policies, default, labels, delivered_at
 
 
 def warm_default(policy: _policy.Policy, model_id: str, train_config) -> None:
@@ -165,11 +170,12 @@ def main(args: Args) -> None:
     logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
 
     if isinstance(args.policy, ModelSet):
-        policies, default, labels = create_model_set(args)
+        policies, default, labels, delivered_at = create_model_set(args)
         server = websocket_policy_server.WebsocketPolicyServer(
             policies=policies,
             default=default,
             labels=labels,
+            delivered_at=delivered_at,
             host="0.0.0.0",
             port=args.port,
         )
