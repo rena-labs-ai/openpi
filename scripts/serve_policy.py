@@ -6,6 +6,7 @@ import pathlib
 import socket
 import time
 
+import jax
 import tyro
 
 from openpi.policies import policy as _policy
@@ -165,6 +166,8 @@ def warm_default(policy: _policy.Policy, model_id: str, train_config) -> None:
 
 
 def main(args: Args) -> None:
+    # A restart's compiles run while robots wait; cached, each is paid once per box.
+    jax.config.update("jax_compilation_cache_dir", str(pathlib.Path("~/.cache/jax").expanduser()))
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
     logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
@@ -185,7 +188,6 @@ def main(args: Args) -> None:
     policy = create_policy(args)
     policy_metadata = policy.metadata
 
-    # Record the policy's behavior.
     if args.record:
         policy = _policy.PolicyRecorder(policy, "policy_records")
 
