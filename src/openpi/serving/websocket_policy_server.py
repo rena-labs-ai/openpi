@@ -262,7 +262,6 @@ class WebsocketPolicyServer:
                     self._in_flight -= 1
                 t3 = time.monotonic()
 
-                # Extract per-stage policy timing before packing
                 policy_timing = action.pop("policy_timing", {})
 
                 packed = packer.pack(action)

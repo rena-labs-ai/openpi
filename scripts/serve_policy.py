@@ -166,8 +166,7 @@ def warm_default(policy: _policy.Policy, model_id: str, train_config) -> None:
 
 
 def main(args: Args) -> None:
-    # Every restart recompiles the default's warm-up while the port is closed, and each other
-    # model on its first request; cached, each compile is paid once per box instead.
+    # A restart's compiles run while robots wait; cached, each is paid once per box.
     jax.config.update("jax_compilation_cache_dir", str(pathlib.Path("~/.cache/jax").expanduser()))
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
@@ -189,7 +188,6 @@ def main(args: Args) -> None:
     policy = create_policy(args)
     policy_metadata = policy.metadata
 
-    # Record the policy's behavior.
     if args.record:
         policy = _policy.PolicyRecorder(policy, "policy_records")
 
