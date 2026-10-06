@@ -8,8 +8,11 @@ from openpi_client import msgpack_numpy
 import pytest
 import websockets
 
+from openpi.serving.websocket_policy_server import _PROBE
+from openpi.serving.websocket_policy_server import _ROBOT
 from openpi.serving.websocket_policy_server import QC_HOLD_SECONDS
 from openpi.serving.websocket_policy_server import WebsocketPolicyServer
+from openpi.serving.websocket_policy_server import _ProbeRefusedError
 from openpi.serving.websocket_policy_server import resolve_model_path
 
 IDS = {"exp_v14/70000", "exp_v13/70000", "exp_v12/70000"}
@@ -237,7 +240,72 @@ def test_a_blocking_inference_leaves_the_event_loop_free():
     asyncio.run(scenario())
 
 
-def test_inferences_stay_serialized_on_one_worker():
-    """One worker keeps the ordering a direct call had."""
+def _occupy_worker(server):
+    """Submits an inference that holds the worker until the returned event is set."""
+    release = threading.Event()
+    started = threading.Event()
+
+    def hold():
+        started.set()
+        release.wait(5)
+
+    server._inference.submit(_PROBE, hold)  # noqa: SLF001
+    assert started.wait(5)
+    return release
+
+
+def test_a_queued_robot_request_runs_before_queued_probes():
     server = WebsocketPolicyServer(policy=_CountingPolicy(), port=0)
-    assert server._executor._max_workers == 1  # noqa: SLF001
+    ran = []
+    release = _occupy_worker(server)
+
+    probe = server._inference.submit(_PROBE, lambda: ran.append("probe"))  # noqa: SLF001
+    robot = server._inference.submit(_ROBOT, lambda: ran.append("robot"))  # noqa: SLF001
+    release.set()
+    probe.result(5)
+    robot.result(5)
+
+    assert ran == ["robot", "probe"]
+
+
+def test_inferences_never_overlap():
+    server = WebsocketPolicyServer(policy=_CountingPolicy(), port=0)
+    running = []
+    overlaps = []
+
+    def job():
+        running.append(1)
+        overlaps.append(len(running))
+        time.sleep(0.01)
+        running.pop()
+
+    futures = [server._inference.submit(i % 2, job) for i in range(6)]  # noqa: SLF001
+    for f in futures:
+        f.result(5)
+
+    assert overlaps == [1] * 6
+
+
+def test_a_probe_queued_behind_a_robot_inference_is_refused():
+    """The hold is checked when a probe reaches the worker, not when it arrived."""
+    server = WebsocketPolicyServer(policy=_CountingPolicy(), port=0)
+    robot_policy, probe_policy = _BlockingPolicy(), _CountingPolicy()
+
+    robot = server._inference.submit(_ROBOT, lambda: server._run_robot(robot_policy.infer, {}))  # noqa: SLF001
+    assert robot_policy.entered.wait(5)
+    probe = server._inference.submit(_PROBE, lambda: server._run_probe(probe_policy.infer, {}))  # noqa: SLF001
+    robot_policy.release.set()
+    robot.result(5)
+
+    with pytest.raises(_ProbeRefusedError):
+        probe.result(5)
+    assert probe_policy.calls == 0
+
+
+def test_healthz_advertises_robot_first():
+    """The gate keeps several probes outstanding only against a server that says this."""
+    server, _ = _clocked()
+
+    _, body = server._process_request(_Connection(), _Request("/healthz"))  # noqa: SLF001
+
+    assert json.loads(body)["robot_first"] is True

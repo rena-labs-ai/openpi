@@ -1,9 +1,13 @@
 import asyncio
 import concurrent.futures
+import functools
 import http
+import itertools
 import json
 import logging
 import os
+import queue
+import threading
 import time
 import traceback
 
@@ -18,6 +22,44 @@ logger = logging.getLogger(__name__)
 
 # How long rena-training's quality-gate probes wait past a robot's last inference.
 QC_HOLD_SECONDS = float(os.environ.get("RENA_QC_HOLD_SECONDS", "1800"))
+
+_ROBOT = 0
+_PROBE = 1
+
+
+class _ProbeRefusedError(Exception):
+    def __init__(self, retry_after: float):
+        super().__init__(retry_after)
+        self.retry_after = retry_after
+
+
+class _InferenceQueue:
+    """Runs inferences one at a time on a single worker thread, robot requests ahead of queued probes.
+
+    One worker keeps inferences serialized on the single GPU, while the event loop stays
+    free to answer keepalive pings: a policy's first request compiles for ~80s, and on
+    the loop thread that silence is what the client closes the connection over.
+    """
+
+    def __init__(self) -> None:
+        self._queue: queue.PriorityQueue = queue.PriorityQueue()
+        self._order = itertools.count()
+        threading.Thread(target=self._work, name="infer", daemon=True).start()
+
+    def submit(self, priority: int, fn) -> concurrent.futures.Future:
+        future: concurrent.futures.Future = concurrent.futures.Future()
+        self._queue.put((priority, next(self._order), fn, future))
+        return future
+
+    def _work(self) -> None:
+        while True:
+            _, _, fn, future = self._queue.get()
+            if not future.set_running_or_notify_cancel():
+                continue
+            try:
+                future.set_result(fn())
+            except BaseException as e:
+                future.set_exception(e)
 
 
 def resolve_model_path(path: str, ids, default: str) -> str | None:
@@ -79,11 +121,7 @@ class WebsocketPolicyServer:
         self._metadata = metadata or {}
         self._last_infer_at: float | None = None
         self._in_flight = 0
-        # One worker keeps inferences serialized on the single GPU exactly as a
-        # direct call did, while the loop stays free to answer keepalive pings: a
-        # policy's first request compiles for ~80s, and on the loop thread that
-        # silence is what the client closes the connection over.
-        self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="infer")
+        self._inference = _InferenceQueue()
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
@@ -134,6 +172,8 @@ class WebsocketPolicyServer:
                 "last_infer_at": self._last_infer_at,
                 "in_flight": self._in_flight,
                 "qc_hold_seconds": QC_HOLD_SECONDS,
+                # A client keeps several probes outstanding only where robots jump them.
+                "robot_first": True,
             }
             if self._policies is not None:
                 body["models"] = list(self._policies)
@@ -154,6 +194,22 @@ class WebsocketPolicyServer:
         if self._last_infer_at is None:
             return 0.0
         return max(0.0, QC_HOLD_SECONDS - (time.time() - self._last_infer_at))
+
+    def _run_robot(self, infer, obs: dict) -> dict:
+        try:
+            return infer(obs)
+        finally:
+            # On the worker, before it takes the next request: a probe queued behind
+            # this inference must already see the hold.
+            self._last_infer_at = time.time()
+
+    def _run_probe(self, infer, obs: dict) -> dict:
+        # Checked when the probe reaches the worker, not when it arrived: a robot
+        # may have inferred while it waited.
+        hold_left = self.probe_hold_left()
+        if hold_left > 0:
+            raise _ProbeRefusedError(hold_left)
+        return infer(obs)
 
     async def _handler(self, websocket: _server.ServerConnection):
         logger.info(f"Connection from {websocket.remote_address} opened")
@@ -189,19 +245,21 @@ class WebsocketPolicyServer:
                 t2b = time.monotonic()
 
                 # QC probes don't count as robot activity for /healthz.
-                is_probe = bool(obs.pop("_qc_probe", False))
-                hold_left = self.probe_hold_left() if is_probe else 0.0
-                if hold_left > 0:
-                    logger.info(f"QC probe refused: {hold_left:.0f}s of robot hold left")
-                    await websocket.send(packer.pack({"_qc_refused": True, "retry_after": hold_left}))
-                    continue
+                if obs.pop("_qc_probe", False):
+                    priority = _PROBE
+                    job = functools.partial(self._run_probe, policy.infer, obs)
+                else:
+                    priority = _ROBOT
+                    job = functools.partial(self._run_robot, policy.infer, obs)
                 self._in_flight += 1
                 try:
-                    action = await asyncio.get_running_loop().run_in_executor(self._executor, policy.infer, obs)
+                    action = await asyncio.wrap_future(self._inference.submit(priority, job))
+                except _ProbeRefusedError as refused:
+                    logger.info(f"QC probe refused: {refused.retry_after:.0f}s of robot hold left")
+                    await websocket.send(packer.pack({"_qc_refused": True, "retry_after": refused.retry_after}))
+                    continue
                 finally:
                     self._in_flight -= 1
-                    if not is_probe:
-                        self._last_infer_at = time.time()
                 t3 = time.monotonic()
 
                 # Extract per-stage policy timing before packing
