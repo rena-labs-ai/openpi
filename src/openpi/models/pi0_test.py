@@ -1,7 +1,9 @@
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
+import numpy as np
 
+from openpi.models import model as _model
 from openpi.models.pi0 import masked_mean_pool
 from openpi.models.pi0 import stage_ce_and_acc
 import openpi.models.pi0_config as _pi0_config
@@ -24,7 +26,7 @@ def test_masked_mean_pool_all_masked_is_safe():
 def test_stage_ce_perfect_prediction():
     logits = jnp.array([[10.0, -10.0, -10.0], [-10.0, 10.0, -10.0]])  # argmax 0,1
     labels = jnp.array([0, 1], dtype=jnp.int32)
-    ce, acc = stage_ce_and_acc(logits, labels, num_classes=3)
+    ce, acc = stage_ce_and_acc(logits, labels)
     assert float(acc) == 1.0
     assert float(ce) < 1e-3
 
@@ -32,9 +34,32 @@ def test_stage_ce_perfect_prediction():
 def test_stage_ce_wrong_prediction():
     logits = jnp.array([[-10.0, 10.0, -10.0]])  # argmax 1
     labels = jnp.array([0], dtype=jnp.int32)
-    ce, acc = stage_ce_and_acc(logits, labels, num_classes=3)
+    ce, acc = stage_ce_and_acc(logits, labels)
     assert float(acc) == 0.0
     assert float(ce) > 1.0
+
+
+def test_stage_ce_width_follows_logits():
+    logits = jnp.full((1, 7), -10.0).at[0, 5].set(10.0)
+    ce, acc = stage_ce_and_acc(logits, jnp.array([5], dtype=jnp.int32))
+    assert float(acc) == 1.0
+    assert float(ce) < 1e-3
+
+
+def test_stage_head_width_follows_config():
+    model = nnx.eval_shape(_pi0_config.Pi0Config(stage_classes=7).create, jax.random.key(0))
+    assert model.stage_head_out.kernel.value.shape[-1] == 7
+
+
+def test_load_takes_stage_classes_from_checkpoint(monkeypatch):
+    monkeypatch.setattr(_model.BaseModelConfig, "load", lambda self, params, **_: self)
+    params = {"stage_head_out": {"kernel": np.zeros((4, 7)), "bias": np.zeros(7)}}
+    assert _pi0_config.Pi0Config().load(params).stage_classes == 7
+
+
+def test_load_keeps_config_width_without_stage_head(monkeypatch):
+    monkeypatch.setattr(_model.BaseModelConfig, "load", lambda self, params, **_: self)
+    assert _pi0_config.Pi0Config(stage_classes=7).load({}).stage_classes == 7
 
 
 def _get_frozen_state(config: _pi0_config.Pi0Config) -> nnx.State:
