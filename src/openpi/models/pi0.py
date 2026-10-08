@@ -76,10 +76,7 @@ def masked_mean_pool(tokens, mask):
 
 
 def stage_ce_and_acc(logits, labels):
-    """Softmax cross-entropy and accuracy for the stage head.
-
-    logits: float[b, n]; labels: int[b]. Returns (scalar ce, scalar acc).
-    """
+    """Mean cross-entropy and accuracy of stage logits ``[b, n]`` against int labels ``[b]``."""
     labels = labels.astype(jnp.int32)
     onehot = jax.nn.one_hot(labels, logits.shape[-1])
     logp = jax.nn.log_softmax(logits, axis=-1)
@@ -124,9 +121,7 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
-        # Stage classification head (output-only): masked mean-pool over image
-        # tokens -> MLP -> stage_classes logits. Outside .*llm.*/.*img.*/.*lora.* so it stays
-        # trainable under the freeze filter and is LoRA-compatible.
+        # Named outside .*llm.*/.*img.*/.*lora.* so the freeze filter leaves it trainable under LoRA.
         self.stage_head_in = nnx.Linear(paligemma_config.width, action_expert_config.width, rngs=rngs)
         self.stage_head_out = nnx.Linear(action_expert_config.width, config.stage_classes, rngs=rngs)
 
@@ -256,10 +251,7 @@ class Pi0(_model.BaseModel):
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
     def _stage_logits_from_prefix(self, prefix_out, prefix_mask, n_img_tokens):
-        """Pool image tokens from a prefix pass and run them through the stage head.
-
-        Returns float[b, stage_classes] raw stage logits.
-        """
+        """Stage logits ``[b, stage_classes]`` from the pooled image tokens of a prefix pass."""
         img_tokens = prefix_out[:, :n_img_tokens]
         img_mask = prefix_mask[:, :n_img_tokens]
         pooled = masked_mean_pool(img_tokens, img_mask)
@@ -267,12 +259,7 @@ class Pi0(_model.BaseModel):
         return self.stage_head_out(h)
 
     def compute_loss_and_stage(self, rng, observation, actions, *, train=False):
-        """Like compute_loss but also returns stage logits from the stage head.
-
-        Returns:
-            flow_loss: float[*b, ah] — per-(batch,horizon) MSE (same as compute_loss).
-            stage_logits: float[b, stage_classes] — raw stage logits.
-        """
+        """Like compute_loss, but also returns the stage head's raw logits."""
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
         batch_shape = actions.shape[:-2]
@@ -377,12 +364,7 @@ class Pi0(_model.BaseModel):
         num_steps: int | at.Int[at.Array, ""] = 10,
         noise: at.Float[at.Array, "b ah ad"] | None = None,
     ):
-        """Like sample_actions but also returns raw stage logits from the stage head.
-
-        Returns:
-            actions: float[b, ah, ad] — sampled action sequence.
-            stage_logits: float[b, stage_classes] — raw stage logits.
-        """
+        """Like sample_actions, but also returns the stage head's raw logits."""
         x_0, prefix_out, prefix_mask, n_img_tokens = self._sample_actions_impl(rng, observation, num_steps, noise)
         stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
         return x_0, stage_logits

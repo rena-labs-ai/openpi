@@ -24,7 +24,7 @@ def test_masked_mean_pool_all_masked_is_safe():
 
 
 def test_stage_ce_perfect_prediction():
-    logits = jnp.array([[10.0, -10.0, -10.0], [-10.0, 10.0, -10.0]])  # argmax 0,1
+    logits = jnp.array([[10.0, -10.0, -10.0], [-10.0, 10.0, -10.0]])
     labels = jnp.array([0, 1], dtype=jnp.int32)
     ce, acc = stage_ce_and_acc(logits, labels)
     assert float(acc) == 1.0
@@ -32,7 +32,7 @@ def test_stage_ce_perfect_prediction():
 
 
 def test_stage_ce_wrong_prediction():
-    logits = jnp.array([[-10.0, 10.0, -10.0]])  # argmax 1
+    logits = jnp.array([[-10.0, 10.0, -10.0]])
     labels = jnp.array([0], dtype=jnp.int32)
     ce, acc = stage_ce_and_acc(logits, labels)
     assert float(acc) == 0.0

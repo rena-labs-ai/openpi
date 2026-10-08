@@ -54,8 +54,7 @@ class Pi0Config(_model.BaseModelConfig):
 
     @override
     def load(self, params: at.Params, *, remove_extra_params: bool = True) -> "Pi0":
-        # The checkpoint's own head width wins: one serving config builds every model in a
-        # roster, and checkpoints trained on different stage vocabularies sit side by side.
+        # The checkpoint's head width beats the config's, so one serving config loads a mixed roster.
         head = params.get("stage_head_out")
         config = self if head is None else dataclasses.replace(self, stage_classes=head["kernel"].shape[-1])
         return _model.BaseModelConfig.load(config, params, remove_extra_params=remove_extra_params)
