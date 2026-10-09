@@ -31,6 +31,7 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    # rena sets this from rena_task_grammar.STAGES; 3 is every checkpoint trained before that table.
     stage_classes: int = 3
 
     def __post_init__(self):
