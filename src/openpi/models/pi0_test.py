@@ -39,27 +39,27 @@ def test_stage_ce_wrong_prediction():
     assert float(ce) > 1.0
 
 
-def test_stage_ce_width_follows_logits():
+def test_stage_ce_takes_num_stage_classes_from_logits():
     logits = jnp.full((1, 7), -10.0).at[0, 5].set(10.0)
     ce, acc = stage_ce_and_acc(logits, jnp.array([5], dtype=jnp.int32))
     assert float(acc) == 1.0
     assert float(ce) < 1e-3
 
 
-def test_stage_head_width_follows_config():
-    model = nnx.eval_shape(_pi0_config.Pi0Config(stage_classes=7).create, jax.random.key(0))
+def test_stage_head_follows_num_stage_classes():
+    model = nnx.eval_shape(_pi0_config.Pi0Config(num_stage_classes=7).create, jax.random.key(0))
     assert model.stage_head_out.kernel.value.shape[-1] == 7
 
 
-def test_load_takes_stage_classes_from_checkpoint(monkeypatch):
+def test_load_takes_num_stage_classes_from_checkpoint(monkeypatch):
     monkeypatch.setattr(_model.BaseModelConfig, "load", lambda self, params, **_: self)
     params = {"stage_head_out": {"kernel": np.zeros((4, 7)), "bias": np.zeros(7)}}
-    assert _pi0_config.Pi0Config().load(params).stage_classes == 7
+    assert _pi0_config.Pi0Config().load(params).num_stage_classes == 7
 
 
-def test_load_keeps_config_width_without_stage_head(monkeypatch):
+def test_load_keeps_config_num_stage_classes_without_stage_head(monkeypatch):
     monkeypatch.setattr(_model.BaseModelConfig, "load", lambda self, params, **_: self)
-    assert _pi0_config.Pi0Config(stage_classes=7).load({}).stage_classes == 7
+    assert _pi0_config.Pi0Config(num_stage_classes=7).load({}).num_stage_classes == 7
 
 
 def _get_frozen_state(config: _pi0_config.Pi0Config) -> nnx.State:
