@@ -123,7 +123,7 @@ class Pi0(_model.BaseModel):
 
         # Named outside .*llm.*/.*img.*/.*lora.* so the freeze filter leaves it trainable under LoRA.
         self.stage_head_in = nnx.Linear(paligemma_config.width, action_expert_config.width, rngs=rngs)
-        self.stage_head_out = nnx.Linear(action_expert_config.width, config.stage_classes, rngs=rngs)
+        self.stage_head_out = nnx.Linear(action_expert_config.width, config.num_stage_classes, rngs=rngs)
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
@@ -251,7 +251,7 @@ class Pi0(_model.BaseModel):
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
     def _stage_logits_from_prefix(self, prefix_out, prefix_mask, n_img_tokens):
-        """Stage logits ``[b, stage_classes]`` from the pooled image tokens of a prefix pass."""
+        """Stage logits ``[b, num_stage_classes]`` from the pooled image tokens of a prefix pass."""
         img_tokens = prefix_out[:, :n_img_tokens]
         img_mask = prefix_mask[:, :n_img_tokens]
         pooled = masked_mean_pool(img_tokens, img_mask)
