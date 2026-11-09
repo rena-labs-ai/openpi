@@ -252,6 +252,8 @@ class TokenizePrompt(DataTransformFn):
     def __call__(self, data: DataDict) -> DataDict:
         if (prompt := data.pop("prompt", None)) is None:
             raise ValueError("Prompt is required")
+        # Set per sample by a training-only transform (rena_policy.AutolabelPrompt): leave the state out of the prompt.
+        drop_state = bool(data.pop("drop_state", False))
 
         if self.discrete_state_input:
             if (state := data.get("state", None)) is None:
@@ -262,7 +264,7 @@ class TokenizePrompt(DataTransformFn):
         if not isinstance(prompt, str):
             prompt = prompt.item()
 
-        tokens, token_masks = self.tokenizer.tokenize(prompt, state)
+        tokens, token_masks = self.tokenizer.tokenize(prompt, state, drop_state=drop_state)
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
 
 
