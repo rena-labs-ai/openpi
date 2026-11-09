@@ -368,6 +368,8 @@ class LeRobotRenaDataConfig(DataConfigFactory):
 
     # Share of training frames whose prompt leaves the state out.
     state_dropout: float = 0.0
+    # Where the target boxes reach the policy: as <loc> tokens in the prompt, or drawn on the camera images.
+    boxes_in: Literal["text", "image"] = "text"
     action_sequence_keys: Sequence[str] = ("action",)
 
     @override
@@ -388,7 +390,9 @@ class LeRobotRenaDataConfig(DataConfigFactory):
                     }
                 ),
                 rena_policy.AutolabelPrompt(
-                    str(HF_LEROBOT_HOME / self.repo_id / "meta/autolabel.jsonl"), state_dropout=self.state_dropout
+                    str(HF_LEROBOT_HOME / self.repo_id / "meta/autolabel.jsonl"),
+                    state_dropout=self.state_dropout,
+                    boxes_in=self.boxes_in,
                 ),
             ]
         )
