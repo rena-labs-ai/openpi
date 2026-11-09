@@ -20,6 +20,7 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.rena_policy as rena_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
@@ -355,6 +356,52 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotRenaDataConfig(DataConfigFactory):
+    """A dataset rena-autolabel wrote (autolabel/write_dataset.py): renav2 recordings with their labels in
+    meta/autolabel.jsonl, which give each frame's prompt (rena_policy.AutolabelPrompt). Actions are absolute joint
+    targets in the data and deltas from the chunk's first state for the model, the gripper absolute."""
+
+    # Share of training frames whose prompt leaves the state out.
+    state_dropout: float = 0.0
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        from lerobot.common.constants import HF_LEROBOT_HOME
+
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        "images": {cam: f"observation.images.{cam}" for cam in ("image_0", "image_1", "image_2")},
+                        "state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                        "task_stage": "observation.task_stage",
+                        "episode_index": "episode_index",
+                        "frame_index": "frame_index",
+                    }
+                ),
+                rena_policy.AutolabelPrompt(
+                    str(HF_LEROBOT_HOME / self.repo_id / "meta/autolabel.jsonl"), state_dropout=self.state_dropout
+                ),
+            ]
+        )
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = _transforms.Group(
+            inputs=[rena_policy.RenaInputs(), _transforms.DeltaActions(delta_action_mask)],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask), rena_policy.RenaOutputs()],
+        )
+        return dataclasses.replace(
+            self.create_base_config(assets_dirs, model_config),
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=self.action_sequence_keys,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -479,6 +526,9 @@ class TrainConfig:
     lr_schedule: _optimizer.LRScheduleConfig = dataclasses.field(default_factory=_optimizer.CosineDecaySchedule)
     optimizer: _optimizer.OptimizerConfig = dataclasses.field(default_factory=_optimizer.AdamW)
     ema_decay: float | None = 0.99
+    # Weight of the stage head's cross-entropy (pi0.Pi0.compute_loss_and_stage) added to the flow loss; 0 trains
+    # without it, and with it every batch needs observation task_stage.
+    stage_loss_weight: float = 0.0
 
     # Specifies which weights should be frozen.
     freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
@@ -751,6 +801,24 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    #
+    # Rena configs.
+    #
+    TrainConfig(
+        # Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA; the state
+        # in the prompt, left out of a fifth of training prompts; the stage head as rena-training trains it.
+        name="pi05_rena_full",
+        model=pi0_config.Pi0Config(pi05=True, action_horizon=50, num_stage_classes=7),  # len(rena_task_grammar.STAGES)
+        data=LeRobotRenaDataConfig(
+            repo_id="rena/rena_autolabel_v2",
+            base_config=DataConfig(prompt_from_task=True),
+            state_dropout=0.2,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        stage_loss_weight=0.03,
+        fsdp_devices=2,
+        num_workers=8,
     ),
     #
     # Fine-tuning Aloha configs.
