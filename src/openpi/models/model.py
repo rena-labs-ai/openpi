@@ -106,6 +106,9 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # Per-frame stage label the stage head trains on (rena's task_stage); None where a dataset has none.
+    task_stage: at.Int[ArrayT, "*b"] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -126,6 +129,7 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            task_stage=data.get("task_stage"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -205,6 +209,7 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        task_stage=observation.task_stage,
     )
 
 
@@ -231,12 +236,17 @@ class BaseModelConfig(abc.ABC):
         """Create a new model, initializing parameters."""
 
     def load(self, params: at.Params, *, remove_extra_params: bool = True) -> "BaseModel":
-        """Create a model with the given parameters."""
-        model = nnx.eval_shape(self.create, jax.random.key(0))
+        """Create a model with the given parameters. Parameters the model has and `params` lacks (a head added after
+        the checkpoint was saved, like the stage head) keep their fresh initialisation, so the model is initialised for
+        real rather than by shape."""
+        model = self.create(jax.random.key(0))
         graphdef, state = nnx.split(model)
+        pure = state.to_pure_dict()
         if remove_extra_params:
-            params = ocp.transform_utils.intersect_trees(state.to_pure_dict(), params)
-        at.check_pytree_equality(expected=state.to_pure_dict(), got=params, check_shapes=True, check_dtypes=False)
+            params = ocp.transform_utils.intersect_trees(pure, params)
+        at.check_pytree_equality(
+            expected=ocp.transform_utils.intersect_trees(pure, params), got=params, check_shapes=True, check_dtypes=False
+        )
         state.replace_by_pure_dict(params)
         return nnx.merge(graphdef, state)
 

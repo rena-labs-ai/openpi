@@ -63,6 +63,28 @@ def posemb_sincos(
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
 
 
+def masked_mean_pool(tokens, mask):
+    """Mean over the sequence axis, ignoring masked (False) positions.
+
+    tokens: float[b, s, emb]; mask: bool[b, s]. Returns float[b, emb].
+    Safe against all-masked rows (divides by a clamped count).
+    """
+    w = mask.astype(tokens.dtype)[..., None]  # [b, s, 1]
+    summed = jnp.sum(tokens * w, axis=1)  # [b, emb]
+    count = jnp.clip(jnp.sum(w, axis=1), 1.0)  # [b, 1]
+    return summed / count
+
+
+def stage_ce_and_acc(logits, labels):
+    """Mean cross-entropy and accuracy of stage logits ``[b, n]`` against int labels ``[b]``."""
+    labels = labels.astype(jnp.int32)
+    onehot = jax.nn.one_hot(labels, logits.shape[-1])
+    logp = jax.nn.log_softmax(logits, axis=-1)
+    ce = -jnp.mean(jnp.sum(onehot * logp, axis=-1))
+    acc = jnp.mean((jnp.argmax(logits, axis=-1) == labels).astype(jnp.float32))
+    return ce, acc
+
+
 class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
@@ -99,16 +121,21 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
+        # Named outside .*llm.*/.*img.*/.*lora.* so the freeze filter leaves it trainable under LoRA.
+        self.stage_head_in = nnx.Linear(paligemma_config.width, action_expert_config.width, rngs=rngs)
+        self.stage_head_out = nnx.Linear(action_expert_config.width, config.num_stage_classes, rngs=rngs)
+
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
 
     @at.typecheck
     def embed_prefix(
         self, obs: _model.Observation
-    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"]]:
+    ) -> tuple[at.Float[at.Array, "b s emb"], at.Bool[at.Array, "b s"], at.Bool[at.Array, " s"], int]:
         input_mask = []
         ar_mask = []
         tokens = []
+        n_img_tokens = 0
         # embed images
         for name in obs.images:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
@@ -123,6 +150,7 @@ class Pi0(_model.BaseModel):
             )
             # image tokens attend to each other
             ar_mask += [False] * image_tokens.shape[1]
+            n_img_tokens += image_tokens.shape[1]
 
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:
@@ -134,7 +162,7 @@ class Pi0(_model.BaseModel):
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
-        return tokens, input_mask, ar_mask
+        return tokens, input_mask, ar_mask, n_img_tokens
 
     @at.typecheck
     def embed_suffix(
@@ -185,7 +213,24 @@ class Pi0(_model.BaseModel):
         ar_mask = jnp.array(ar_mask)
         return tokens, input_mask, ar_mask, adarms_cond
 
+    def _forward(self, observation, x_t, time):
+        """Run one prefix+suffix transformer pass; return outputs needed for loss and stage head."""
+        prefix_tokens, prefix_mask, prefix_ar_mask, n_img_tokens = self.embed_prefix(observation)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
+        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
+        attn_mask = make_attn_mask(input_mask, ar_mask)
+        positions = jnp.cumsum(input_mask, axis=1) - 1
+        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
+            [prefix_tokens, suffix_tokens],
+            mask=attn_mask,
+            positions=positions,
+            adarms_cond=[None, adarms_cond],
+        )
+        return prefix_out, prefix_mask, n_img_tokens, suffix_out
+
     @override
+    @at.typecheck
     def compute_loss(
         self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
     ) -> at.Float[at.Array, "*b ah"]:
@@ -200,28 +245,47 @@ class Pi0(_model.BaseModel):
         u_t = noise - actions
 
         # one big forward pass of prefix + suffix at once
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
-        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
-        input_mask = jnp.concatenate([prefix_mask, suffix_mask], axis=1)
-        ar_mask = jnp.concatenate([prefix_ar_mask, suffix_ar_mask], axis=0)
-        attn_mask = make_attn_mask(input_mask, ar_mask)
-        positions = jnp.cumsum(input_mask, axis=1) - 1
-        (prefix_out, suffix_out), _ = self.PaliGemma.llm(
-            [prefix_tokens, suffix_tokens], mask=attn_mask, positions=positions, adarms_cond=[None, adarms_cond]
-        )
+        _prefix_out, _prefix_mask, _n_img_tokens, suffix_out = self._forward(observation, x_t, time)
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
 
         return jnp.mean(jnp.square(v_t - u_t), axis=-1)
 
-    @override
-    def sample_actions(
+    def _stage_logits_from_prefix(self, prefix_out, prefix_mask, n_img_tokens):
+        """Stage logits ``[b, num_stage_classes]`` from the pooled image tokens of a prefix pass."""
+        img_tokens = prefix_out[:, :n_img_tokens]
+        img_mask = prefix_mask[:, :n_img_tokens]
+        pooled = masked_mean_pool(img_tokens, img_mask)
+        h = nnx.swish(self.stage_head_in(pooled))
+        return self.stage_head_out(h)
+
+    def compute_loss_and_stage(self, rng, observation, actions, *, train=False):
+        """Like compute_loss, but also returns the stage head's raw logits."""
+        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
+        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
+        batch_shape = actions.shape[:-2]
+        noise = jax.random.normal(noise_rng, actions.shape)
+        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
+        time_expanded = time[..., None, None]
+        x_t = time_expanded * noise + (1 - time_expanded) * actions
+        u_t = noise - actions
+        prefix_out, prefix_mask, n_img_tokens, suffix_out = self._forward(observation, x_t, time)
+        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+        flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
+        return flow_loss, stage_logits
+
+    def _sample_actions_impl(
         self,
         rng: at.KeyArrayLike,
         observation: _model.Observation,
-        *,
-        num_steps: int | at.Int[at.Array, ""] = 10,
-        noise: at.Float[at.Array, "b ah ad"] | None = None,
-    ) -> _model.Actions:
+        num_steps: int | at.Int[at.Array, ""],
+        noise: at.Float[at.Array, "b ah ad"] | None,
+    ):
+        """Shared denoising loop. Returns (x_0, prefix_out, prefix_mask, n_img_tokens).
+
+        prefix_out / n_img_tokens are captured from the prefix forward pass so the
+        stage head can pool over image tokens without a second forward pass.
+        """
         observation = _model.preprocess_observation(None, observation, train=False)
         # note that we use the convention more common in diffusion literature, where t=1 is noise and t=0 is the target
         # distribution. yes, this is the opposite of the pi0 paper, and I'm sorry.
@@ -231,10 +295,12 @@ class Pi0(_model.BaseModel):
             noise = jax.random.normal(rng, (batch_size, self.action_horizon, self.action_dim))
 
         # first fill KV cache with a forward pass of the prefix
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_prefix(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask, n_img_tokens = self.embed_prefix(observation)
         prefix_attn_mask = make_attn_mask(prefix_mask, prefix_ar_mask)
         positions = jnp.cumsum(prefix_mask, axis=1) - 1
-        _, kv_cache = self.PaliGemma.llm([prefix_tokens, None], mask=prefix_attn_mask, positions=positions)
+        (prefix_out, _), kv_cache = self.PaliGemma.llm(
+            [prefix_tokens, None], mask=prefix_attn_mask, positions=positions
+        )
 
         def step(carry):
             x_t, time = carry
@@ -276,4 +342,29 @@ class Pi0(_model.BaseModel):
             return time >= -dt / 2
 
         x_0, _ = jax.lax.while_loop(cond, step, (noise, 1.0))
+        return x_0, prefix_out, prefix_mask, n_img_tokens
+
+    @override
+    def sample_actions(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ) -> _model.Actions:
+        x_0, _, _, _ = self._sample_actions_impl(rng, observation, num_steps, noise)
         return x_0
+
+    def sample_actions_and_stage(
+        self,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        *,
+        num_steps: int | at.Int[at.Array, ""] = 10,
+        noise: at.Float[at.Array, "b ah ad"] | None = None,
+    ):
+        """Like sample_actions, but also returns the stage head's raw logits."""
+        x_0, prefix_out, prefix_mask, n_img_tokens = self._sample_actions_impl(rng, observation, num_steps, noise)
+        stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
+        return x_0, stage_logits

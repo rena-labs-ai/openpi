@@ -31,6 +31,8 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
+    # Classes of the stage head (pi0.Pi0.stage_head_out); rena's are rena_task_grammar.STAGES.
+    num_stage_classes: int = 3
 
     def __post_init__(self):
         if self.max_token_len is None:
@@ -50,6 +52,13 @@ class Pi0Config(_model.BaseModelConfig):
         from openpi.models.pi0 import Pi0
 
         return Pi0(self, rngs=nnx.Rngs(rng))
+
+    @override
+    def load(self, params: at.Params, *, remove_extra_params: bool = True) -> "Pi0":
+        # A checkpoint's stage head sets the class count, so one config loads checkpoints trained with any.
+        head = params.get("stage_head_out")
+        config = self if head is None else dataclasses.replace(self, num_stage_classes=head["kernel"].shape[-1])
+        return _model.BaseModelConfig.load(config, params, remove_extra_params=remove_extra_params)
 
     @override
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
