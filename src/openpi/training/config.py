@@ -375,8 +375,11 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             inputs=[
                 _transforms.RepackTransform(
                     {
-                        "images": {cam: f"observation.images.{cam}" for cam in ("image_0", "image_1", "image_2")},
-                        "state": "observation.state",
+                        **{
+                            f"observation.images.{cam}": f"observation.images.{cam}"
+                            for cam in rena_policy.CAMERAS.values()
+                        },
+                        "observation.state": "observation.state",
                         "actions": "action",
                         "prompt": "prompt",
                         "task_stage": "observation.task_stage",
@@ -601,6 +604,28 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
+def _rena(name: str, *, state: bool, boxes_in: Literal["text", "image"] = "text") -> TrainConfig:
+    """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
+    stage head as rena-training trains it. With state, the state is in the prompt, left out of a fifth of training
+    prompts; without, the model never sees it. Serving builds each model from the config it trained with."""
+    return TrainConfig(
+        name=name,
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=50, num_stage_classes=7, discrete_state_input=state
+        ),  # len(rena_task_grammar.STAGES)
+        data=LeRobotRenaDataConfig(
+            repo_id="rena/rena_autolabel_v2",
+            base_config=DataConfig(prompt_from_task=True),
+            state_dropout=0.2 if state else 0.0,
+            boxes_in=boxes_in,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        stage_loss_weight=0.03,
+        fsdp_devices=4,
+        num_workers=8,
+    )
+
+
 # Use `get_config` if you need to get a config by name in your code.
 _CONFIGS = [
     #
@@ -809,21 +834,9 @@ _CONFIGS = [
     #
     # Rena configs.
     #
-    TrainConfig(
-        # Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA; the state
-        # in the prompt, left out of a fifth of training prompts; the stage head as rena-training trains it.
-        name="pi05_rena_full",
-        model=pi0_config.Pi0Config(pi05=True, action_horizon=50, num_stage_classes=7),  # len(rena_task_grammar.STAGES)
-        data=LeRobotRenaDataConfig(
-            repo_id="rena/rena_autolabel_v2",
-            base_config=DataConfig(prompt_from_task=True),
-            state_dropout=0.2,
-        ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
-        stage_loss_weight=0.03,
-        fsdp_devices=2,
-        num_workers=8,
-    ),
+    _rena("pi05_rena_full", state=True),
+    _rena("pi05_rena_nostate", state=False),
+    _rena("pi05_rena_boximg_nostate", state=False, boxes_in="image"),
     #
     # Fine-tuning Aloha configs.
     #
