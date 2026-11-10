@@ -1,8 +1,9 @@
 """Rena (renav2: one 6-joint arm with a parallel gripper on a mobile base, three cameras) for pi0.5.
 
-Inputs, as the training repack (config.LeRobotRenaDataConfig) or a client gives them:
-- images: image_0 (right base camera, 480x640), image_1 (wrist, 480x640), image_2 (left base camera, 640x480)
-- state: [7], the six arm joints (rad) then the gripper
+Inputs, keyed as the dataset and rena_vla_client's RenaV2InferenceClient both key them:
+- observation.images.image_0 (right base camera, 480x640), .image_1 (wrist, 480x640), .image_2 (left base camera,
+  640x480), RGB
+- observation.state: [7], the six arm joints (rad) then the gripper
 - prompt
 - actions: [action_horizon, 7], absolute joint targets then the gripper (training only)
 - task_stage: the frame's stage index in rena_task_grammar.STAGES, for the stage head (training only)
@@ -11,6 +12,9 @@ Inputs, as the training repack (config.LeRobotRenaDataConfig) or a client gives 
 
 The cameras fill pi0.5's three slots as rena-training's renav2 does: image_0 the base slot, the wrist the left wrist
 slot, image_2 the right wrist slot.
+
+Outputs: actions [action_horizon, 7], and with the stage head's logits, stage_probs over STAGES and task_stage, their
+argmax, as rena-training's serving returns them.
 """
 
 import dataclasses
@@ -57,12 +61,12 @@ def draw_box(image: np.ndarray, box) -> np.ndarray:
 class RenaInputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
         boxes = data.get("target_boxes") or {}
-        images = {cam: _parse_image(data["images"][cam]) for cam in CAMERAS.values()}
+        images = {cam: _parse_image(data[f"observation.images.{cam}"]) for cam in CAMERAS.values()}
         images = {cam: draw_box(im, boxes[cam]) if cam in boxes else im for cam, im in images.items()}
         inputs = {
             "image": {slot: images[cam] for slot, cam in CAMERAS.items()},
             "image_mask": dict.fromkeys(CAMERAS, np.True_),
-            "state": np.asarray(data["state"], dtype=np.float32),
+            "state": np.asarray(data["observation.state"], dtype=np.float32),
         }
         if "actions" in data:
             inputs["actions"] = np.asarray(data["actions"], dtype=np.float32)
@@ -77,7 +81,24 @@ class RenaInputs(transforms.DataTransformFn):
 @dataclasses.dataclass(frozen=True)
 class RenaOutputs(transforms.DataTransformFn):
     def __call__(self, data: dict) -> dict:
-        return {"actions": np.asarray(data["actions"][:, :7])}
+        out = {"actions": np.asarray(data["actions"][:, :7])}
+        if "stage_logits" in data:
+            logits = np.asarray(data["stage_logits"], dtype=np.float64)
+            probs = np.exp(logits - logits.max())
+            out["stage_probs"] = (probs / probs.sum()).astype(np.float32)
+            out["task_stage"] = int(probs.argmax())
+        return out
+
+
+def make_rena_example() -> dict:
+    """A request as rena_vla_client sends it, once the server has decoded its JPEG images."""
+    return {
+        "observation.images.image_0": np.zeros((480, 640, 3), np.uint8),
+        "observation.images.image_1": np.zeros((480, 640, 3), np.uint8),
+        "observation.images.image_2": np.zeros((640, 480, 3), np.uint8),
+        "observation.state": np.zeros(7, np.float32),
+        "prompt": "pick toy fruit",
+    }
 
 
 @dataclasses.dataclass(frozen=True)
