@@ -1,12 +1,15 @@
 import dataclasses
 import enum
+import json
 import logging
+import pathlib
 import socket
 
 import tyro
 
 from openpi.policies import policy as _policy
 from openpi.policies import policy_config as _policy_config
+from openpi.policies import rena_policy
 from openpi.serving import websocket_policy_server
 from openpi.training import config as _config
 
@@ -36,6 +39,15 @@ class Default:
 
 
 @dataclasses.dataclass
+class Roster:
+    """Serve several rena policies at once, each built from the training config it was trained with, for a client to
+    choose by id (see WebsocketPolicyServer). A JSON file:
+    {"default": id, "models": [{"id": "<exp>/<step>", "config": "pi05_rena_full", "dir": "<checkpoint dir>"}, ...]}"""
+
+    path: str
+
+
+@dataclasses.dataclass
 class Args:
     """Arguments for the serve_policy script."""
 
@@ -52,7 +64,7 @@ class Args:
     record: bool = False
 
     # Specifies how to load the policy. If not provided, the default policy for the environment will be used.
-    policy: Checkpoint | Default = dataclasses.field(default_factory=Default)
+    policy: Checkpoint | Default | Roster = dataclasses.field(default_factory=Default)
 
 
 # Default checkpoints that should be used for each environment.
@@ -96,24 +108,36 @@ def create_policy(args: Args) -> _policy.Policy:
             return create_default_policy(args.env, default_prompt=args.default_prompt)
 
 
+def create_roster(roster: Roster, *, default_prompt: str | None = None) -> tuple[dict[str, _policy.Policy], str]:
+    """The roster's policies by id, each compiled on a client-shaped request before serving starts (a first request
+    that compiled would outlast the client's ping timeout), and the default id."""
+    doc = json.loads(pathlib.Path(roster.path).read_text())
+    policies = {}
+    for m in doc["models"]:
+        policy = _policy_config.create_trained_policy(
+            _config.get_config(m["config"]), m["dir"], default_prompt=default_prompt
+        )
+        policy.infer(rena_policy.make_rena_example())
+        logging.info("Loaded %s (%s) from %s", m["id"], m["config"], m["dir"])
+        policies[m["id"]] = policy
+    return policies, doc["default"]
+
+
 def main(args: Args) -> None:
-    policy = create_policy(args)
-    policy_metadata = policy.metadata
+    if isinstance(args.policy, Roster):
+        policies, default = create_roster(args.policy, default_prompt=args.default_prompt)
+    else:
+        policies, default = {"default": create_policy(args)}, "default"
 
     # Record the policy's behavior.
     if args.record:
-        policy = _policy.PolicyRecorder(policy, "policy_records")
+        policies = {mid: _policy.PolicyRecorder(p, f"policy_records/{mid}") for mid, p in policies.items()}
 
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
     logging.info("Creating server (host: %s, ip: %s)", hostname, local_ip)
 
-    server = websocket_policy_server.WebsocketPolicyServer(
-        policy=policy,
-        host="0.0.0.0",
-        port=args.port,
-        metadata=policy_metadata,
-    )
+    server = websocket_policy_server.WebsocketPolicyServer(policies, default, host="0.0.0.0", port=args.port)
     server.serve_forever()
 
 
