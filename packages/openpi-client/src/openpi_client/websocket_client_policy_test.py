@@ -3,7 +3,7 @@ import threading
 
 import pytest
 import websockets.exceptions
-from websockets.sync.server import serve
+from websockets.sync.server import ServerConnection, serve
 
 from openpi_client import msgpack_numpy, websocket_client_policy
 
@@ -42,6 +42,12 @@ def test_handshake_headers(kwargs, sent):
     assert seen == [sent]
 
 
+needs_respond = pytest.mark.skipif(
+    not hasattr(ServerConnection, "respond"), reason="faking an HTTP status needs websockets>=13"
+)
+
+
+@needs_respond
 def test_a_gateway_502_is_retried_until_the_server_answers(monkeypatch):
     monkeypatch.setattr(websocket_client_policy.time, "sleep", lambda s: None)
     answers = []
@@ -66,10 +72,12 @@ def test_a_gateway_502_is_retried_until_the_server_answers(monkeypatch):
     assert answers == [0, 1]
 
 
+@needs_respond
 def test_a_refusal_is_not_retried():
     with serve(lambda ws: None, "127.0.0.1", 0, process_request=lambda c, r: c.respond(404, "no\n")) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         uri = f"ws://127.0.0.1:{server.socket.getsockname()[1]}"
-        with pytest.raises(websockets.exceptions.InvalidStatus):
+        with pytest.raises(websockets.exceptions.InvalidStatus) as refused:
             websocket_client_policy.WebsocketClientPolicy(uri)
+        assert refused.value.response.status_code == 404
         server.shutdown()

@@ -1,4 +1,5 @@
 import logging
+import socket
 import time
 from typing import Dict, Optional, Tuple
 
@@ -25,7 +26,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         headers: Optional[Dict[str, str]] = None,
         open_timeout: Optional[float] = 10,
     ) -> None:
-        """headers: sent with the handshake, after (and overriding) the api_key header.
+        """headers: sent with the handshake; an Authorization in any case replaces the api_key one.
         open_timeout: seconds to wait for the handshake; a server that scales from zero needs minutes."""
         if host.startswith("ws"):
             self._uri = host
@@ -54,9 +55,13 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                     additional_headers=self._headers or None,
                     open_timeout=self._open_timeout,
                 )
-                metadata = msgpack_numpy.unpackb(conn.recv())
-                return conn, metadata
-            except (ConnectionRefusedError, TimeoutError):
+                try:
+                    return conn, msgpack_numpy.unpackb(conn.recv())
+                except BaseException:
+                    conn.close()
+                    raise
+            # socket.timeout is TimeoutError only from Python 3.10.
+            except (ConnectionRefusedError, TimeoutError, socket.timeout):
                 logging.info("Still waiting for server...")
                 time.sleep(5)
             except websockets.exceptions.InvalidStatus as e:
