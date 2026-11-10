@@ -2,6 +2,7 @@ import logging
 import time
 from typing import Dict, Optional, Tuple
 
+import websockets.exceptions
 import websockets.sync.client
 from typing_extensions import override
 
@@ -33,7 +34,9 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         if port is not None:
             self._uri += f":{port}"
         self._packer = msgpack_numpy.Packer()
-        self._headers = {**({"Authorization": f"Api-Key {api_key}"} if api_key else {}), **(headers or {})}
+        self._headers = dict(headers or {})
+        if api_key and "authorization" not in {h.lower() for h in self._headers}:
+            self._headers["Authorization"] = f"Api-Key {api_key}"
         self._open_timeout = open_timeout
         self._ws, self._server_metadata = self._wait_for_server()
 
@@ -53,7 +56,13 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 )
                 metadata = msgpack_numpy.unpackb(conn.recv())
                 return conn, metadata
-            except ConnectionRefusedError:
+            except (ConnectionRefusedError, TimeoutError):
+                logging.info("Still waiting for server...")
+                time.sleep(5)
+            except websockets.exceptions.InvalidStatus as e:
+                # A gateway in front of a server still starting answers 502 or 504.
+                if e.response.status_code not in (502, 504):
+                    raise
                 logging.info("Still waiting for server...")
                 time.sleep(5)
 

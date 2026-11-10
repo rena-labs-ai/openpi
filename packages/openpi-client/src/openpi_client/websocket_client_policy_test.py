@@ -2,6 +2,7 @@ import contextlib
 import threading
 
 import pytest
+import websockets.exceptions
 from websockets.sync.server import serve
 
 from openpi_client import msgpack_numpy, websocket_client_policy
@@ -30,6 +31,7 @@ def _server():
         ({"api_key": "k"}, "Api-Key k"),
         ({"headers": {"Authorization": "Bearer t"}}, "Bearer t"),
         ({"api_key": "k", "headers": {"Authorization": "Bearer t"}}, "Bearer t"),
+        ({"api_key": "k", "headers": {"authorization": "Bearer t"}}, "Bearer t"),
     ],
 )
 def test_handshake_headers(kwargs, sent):
@@ -38,3 +40,36 @@ def test_handshake_headers(kwargs, sent):
         assert policy.get_server_metadata() == {"ok": True}
         policy._ws.close()
     assert seen == [sent]
+
+
+def test_a_gateway_502_is_retried_until_the_server_answers(monkeypatch):
+    monkeypatch.setattr(websocket_client_policy.time, "sleep", lambda s: None)
+    answers = []
+
+    def process_request(connection, request):
+        answers.append(len(answers))
+        if len(answers) == 1:
+            return connection.respond(502, "starting\n")
+        return None
+
+    def handler(ws):
+        ws.send(msgpack_numpy.packb({"ok": True}))
+        ws.recv()
+
+    with serve(handler, "127.0.0.1", 0, process_request=process_request) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        uri = f"ws://127.0.0.1:{server.socket.getsockname()[1]}"
+        policy = websocket_client_policy.WebsocketClientPolicy(uri)
+        assert policy.get_server_metadata() == {"ok": True}
+        policy._ws.close()
+        server.shutdown()
+    assert answers == [0, 1]
+
+
+def test_a_refusal_is_not_retried():
+    with serve(lambda ws: None, "127.0.0.1", 0, process_request=lambda c, r: c.respond(404, "no\n")) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        uri = f"ws://127.0.0.1:{server.socket.getsockname()[1]}"
+        with pytest.raises(websockets.exceptions.InvalidStatus):
+            websocket_client_policy.WebsocketClientPolicy(uri)
+        server.shutdown()
