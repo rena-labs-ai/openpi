@@ -59,9 +59,13 @@ class Policy(BasePolicy):
             self._model = self._model.to(pytorch_device)
             self._model.eval()
             self._sample_actions = model.sample_actions
+            self._returns_stage = False
         else:
-            # JAX model setup
-            self._sample_actions = nnx_utils.module_jit(model.sample_actions)
+            # JAX model setup. A model with a stage head also returns its logits, as "stage_logits" for the outputs.
+            self._returns_stage = hasattr(model, "sample_actions_and_stage")
+            self._sample_actions = nnx_utils.module_jit(
+                model.sample_actions_and_stage if self._returns_stage else model.sample_actions
+            )
             self._rng = rng or jax.random.key(0)
 
     @override
@@ -89,10 +93,12 @@ class Policy(BasePolicy):
 
         observation = _model.Observation.from_dict(inputs)
         start_time = time.monotonic()
-        outputs = {
-            "state": inputs["state"],
-            "actions": self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs),
-        }
+        sampled = self._sample_actions(sample_rng_or_pytorch_device, observation, **sample_kwargs)
+        outputs = {"state": inputs["state"]}
+        if self._returns_stage:
+            outputs["actions"], outputs["stage_logits"] = sampled
+        else:
+            outputs["actions"] = sampled
         model_time = time.monotonic() - start_time
         if self._is_pytorch_model:
             outputs = jax.tree.map(lambda x: np.asarray(x[0, ...].detach().cpu()), outputs)
@@ -133,3 +139,7 @@ class PolicyRecorder(_base_policy.BasePolicy):
 
         np.save(output_path, np.asarray(data))
         return results
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        return self._policy.metadata
