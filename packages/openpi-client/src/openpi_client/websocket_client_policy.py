@@ -2,8 +2,8 @@ import logging
 import time
 from typing import Dict, Optional, Tuple
 
-from typing_extensions import override
 import websockets.sync.client
+from typing_extensions import override
 
 from openpi_client import base_policy as _base_policy
 from openpi_client import msgpack_numpy
@@ -15,7 +15,17 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
     See WebsocketPolicyServer for a corresponding server implementation.
     """
 
-    def __init__(self, host: str = "0.0.0.0", port: Optional[int] = None, api_key: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        host: str = "0.0.0.0",
+        port: Optional[int] = None,
+        api_key: Optional[str] = None,
+        *,
+        headers: Optional[Dict[str, str]] = None,
+        open_timeout: Optional[float] = 10,
+    ) -> None:
+        """headers: sent with the handshake, after (and overriding) the api_key header.
+        open_timeout: seconds to wait for the handshake; a server that scales from zero needs minutes."""
         if host.startswith("ws"):
             self._uri = host
         else:
@@ -23,7 +33,8 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         if port is not None:
             self._uri += f":{port}"
         self._packer = msgpack_numpy.Packer()
-        self._api_key = api_key
+        self._headers = {**({"Authorization": f"Api-Key {api_key}"} if api_key else {}), **(headers or {})}
+        self._open_timeout = open_timeout
         self._ws, self._server_metadata = self._wait_for_server()
 
     def get_server_metadata(self) -> Dict:
@@ -33,9 +44,12 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
         logging.info(f"Waiting for server at {self._uri}...")
         while True:
             try:
-                headers = {"Authorization": f"Api-Key {self._api_key}"} if self._api_key else None
                 conn = websockets.sync.client.connect(
-                    self._uri, compression=None, max_size=None, additional_headers=headers
+                    self._uri,
+                    compression=None,
+                    max_size=None,
+                    additional_headers=self._headers or None,
+                    open_timeout=self._open_timeout,
                 )
                 metadata = msgpack_numpy.unpackb(conn.recv())
                 return conn, metadata
@@ -44,7 +58,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 time.sleep(5)
 
     @override
-    def infer(self, obs: Dict) -> Dict:  # noqa: UP006
+    def infer(self, obs: Dict) -> Dict:
         data = self._packer.pack(obs)
         self._ws.send(data)
         response = self._ws.recv()
