@@ -4,6 +4,7 @@ import json
 import logging
 import pathlib
 import socket
+import time
 
 import tyro
 
@@ -42,9 +43,14 @@ class Default:
 class Roster:
     """Serve several rena policies at once, each built from the training config it was trained with, for a client to
     choose by id (see WebsocketPolicyServer). A JSON file:
-    {"default": id, "models": [{"id": "<exp>/<step>", "config": "pi05_rena_full", "dir": "<checkpoint dir>"}, ...]}"""
+    {"default": id, "models": [{"id": "<exp>/<step>", "config": "pi05_rena_full", "dir": "<checkpoint dir>"}, ...]}
+    A model with "boxes": true is also served as "<id>+boxes": its pick and place prompts get the target's box from
+    Gemini once per trial (rena_policy.StaticBoxes, gemini_locate), which needs rena-autolabel's autolabel folder
+    importable and GEMINI_API_KEY set."""
 
     path: str
+    # Where each Gemini answer is kept, with the frames it saw.
+    boxes_dir: str = "boxes"
 
 
 @dataclasses.dataclass
@@ -113,14 +119,39 @@ def create_roster(roster: Roster, *, default_prompt: str | None = None) -> tuple
     that compiled would outlast the client's ping timeout), and the default id."""
     doc = json.loads(pathlib.Path(roster.path).read_text())
     policies = {}
+    locate = None
     for m in doc["models"]:
-        policy = _policy_config.create_trained_policy(
-            _config.get_config(m["config"]), m["dir"], default_prompt=default_prompt
-        )
+        train_config = _config.get_config(m["config"])
+        policy = _policy_config.create_trained_policy(train_config, m["dir"], default_prompt=default_prompt)
         policy.infer(rena_policy.make_rena_example())
         logging.info("Loaded %s (%s) from %s", m["id"], m["config"], m["dir"])
         policies[m["id"]] = policy
+        if m.get("boxes"):
+            locate = locate or gemini_locate(pathlib.Path(roster.boxes_dir))
+            policies[f"{m['id']}+boxes"] = rena_policy.StaticBoxes(policy, locate, train_config.data.boxes_in)
     return policies, doc["default"]
+
+
+def gemini_locate(boxes_dir: pathlib.Path):
+    """A StaticBoxes locate: rena-autolabel's deploy question to Gemini (pointing.ask_frames on all three cameras, no
+    thinking), each answer saved in boxes_dir as the frames with the boxes drawn (look.sheet) and as JSON."""
+    import cv2
+    import look
+    import pointing
+
+    boxes_dir.mkdir(parents=True, exist_ok=True)
+
+    def locate(images: dict, command: str, what: str) -> dict:
+        t0 = time.monotonic()
+        bgr = {cam: cv2.cvtColor(im, cv2.COLOR_RGB2BGR) for cam, im in images.items()}
+        answer, usage = pointing.ask_frames(bgr, command, what, thinking=False)
+        name = f"{time.strftime('%Y%m%d_%H%M%S')}_{what.removeprefix('the ').replace(' ', '_')}"
+        cv2.imwrite(str(boxes_dir / f"{name}.jpg"), look.sheet(images, answer))
+        record = {"command": command, "what": what, "answer": answer, "usage": usage, "seconds": time.monotonic() - t0}
+        (boxes_dir / f"{name}.json").write_text(json.dumps(record, indent=1))
+        return {cam: a and a["box"] for cam, a in answer.items()}
+
+    return locate
 
 
 def main(args: Args) -> None:
