@@ -84,3 +84,23 @@ def test_outputs_give_the_stage_as_rena_serving_does():
     assert out["actions"].shape == (50, 7)
     assert out["task_stage"] == 1
     np.testing.assert_allclose(out["stage_probs"], [0.1, 0.7, 0.2], rtol=1e-6)
+
+
+def test_wrist_first_gives_the_wrist_box_on_the_first_request_only():
+    pytest.importorskip("autolabel_prompts")
+    seen = _Seen()
+    boxed = rena_policy.StaticBoxes(seen, seen.locate, "text", wrist_first=True)
+    _ask(boxed, "pick plush toy")
+    _ask(boxed, "pick plush toy")
+    base = "pick plush toy at Right: <loc0512><loc0256><loc0704><loc0512> Left: <loc0256><loc0512><loc0512><loc0704>"
+    assert seen.asked[0]["prompt"] == base + " Wrist: <loc0128><loc0000><loc0896><loc1023>"
+    assert seen.asked[1]["prompt"] == base
+
+
+def test_wrist_first_draws_the_wrist_box_on_the_first_request_only():
+    seen = _Seen()
+    boxed = rena_policy.StaticBoxes(seen, seen.locate, "image", wrist_first=True)
+    _ask(boxed, "pick plush toy")
+    _ask(boxed, "pick plush toy")
+    assert seen.asked[0]["target_boxes"]["image_1"] == [0, 0, 1, 1]
+    assert "image_1" not in seen.asked[1]["target_boxes"]

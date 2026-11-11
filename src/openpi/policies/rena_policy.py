@@ -141,8 +141,9 @@ class AutolabelPrompt(transforms.DataTransformFn):
 
 
 # The base cameras: fixed to the body, so a box from a trial's first frame holds until the object moves. The wrist
-# camera moves with the arm, so its box would be stale at once.
+# camera moves with the arm, so its box holds only for the frame it was found on.
 STATIC_BOX_CAMERAS = ("image_0", "image_2")
+WRIST_CAMERA = "image_1"
 _PICK = re.compile(r"^pick (?P<obj>.+)$")
 _PLACE = re.compile(r"^place (?P<obj>.+) (?P<prep>in|on) (?P<dest>.+)$")
 _HAS_BOXES = re.compile(r" at (?:Right|Left|Wrist): <loc\d{4}>")
@@ -164,8 +165,10 @@ class StaticBoxes(_base_policy.BasePolicy):
     """A rena policy whose pick and place skill prompts get the target's box on the base cameras, as training's box
     prompts gave it: <loc> tokens after the prompt (boxes_in "text") or outlines RenaInputs draws (boxes_in "image").
     The boxes come from `locate` (images by camera, command, what -> box or None by camera) once per trial, on its
-    first request, and stay for the rest of it. A trial starts when the prompt changes or after a pause in requests
-    longer than `new_trial_after_s` (a chunk runs for 2 s); other prompts pass through."""
+    first request, and stay for the rest of it. With wrist_first, that first request also gets the wrist camera's box:
+    it is found on the very frame the policy sees, and training's boxes were up to 2 s old, while the next request
+    comes a chunk (2 s) later with the arm moved. A trial starts when the prompt changes or after a pause in requests
+    longer than `new_trial_after_s`; other prompts pass through."""
 
     def __init__(
         self,
@@ -173,9 +176,12 @@ class StaticBoxes(_base_policy.BasePolicy):
         locate: Callable[[dict[str, np.ndarray], str, str], dict[str, list[float] | None]],
         boxes_in: Literal["text", "image"],
         new_trial_after_s: float = 5.0,
+        *,
+        wrist_first: bool = False,
     ):
         self._policy, self._locate, self._boxes_in = policy, locate, boxes_in
         self._new_trial_after_s = new_trial_after_s
+        self._cameras = (*STATIC_BOX_CAMERAS, WRIST_CAMERA) if wrist_first else STATIC_BOX_CAMERAS
         self._prompt: str | None = None
         self._boxes: dict[str, list[float]] = {}
         self._sizes: dict[str, tuple[int, int]] = {}
@@ -189,20 +195,22 @@ class StaticBoxes(_base_policy.BasePolicy):
         prompt = obs.get("prompt", "")
         if (question := box_question(prompt)) is None:
             return self._policy.infer(obs)
-        if prompt != self._prompt or time.monotonic() - self._last > self._new_trial_after_s:
+        first = prompt != self._prompt or time.monotonic() - self._last > self._new_trial_after_s
+        if first:
             images = {cam: np.asarray(obs[f"observation.images.{cam}"]) for cam in CAMERAS.values()}
             found = self._locate(images, *question)
-            self._boxes = {cam: found[cam] for cam in STATIC_BOX_CAMERAS if found.get(cam)}
-            self._sizes = {cam: (images[cam].shape[1], images[cam].shape[0]) for cam in STATIC_BOX_CAMERAS}
+            self._boxes = {cam: found[cam] for cam in self._cameras if found.get(cam)}
+            self._sizes = {cam: (im.shape[1], im.shape[0]) for cam, im in images.items()}
             self._prompt = prompt
             logging.info("New trial %r: boxes %s", prompt, self._boxes)
+        boxes = {cam: box for cam, box in self._boxes.items() if first or cam in STATIC_BOX_CAMERAS}
         obs = dict(obs)
         if self._boxes_in == "text":
             from autolabel_prompts import with_boxes
 
-            obs["prompt"] = with_boxes(prompt, self._boxes, self._sizes)
+            obs["prompt"] = with_boxes(prompt, boxes, self._sizes)
         else:
-            obs["target_boxes"] = self._boxes
+            obs["target_boxes"] = boxes
         try:
             return self._policy.infer(obs)
         finally:

@@ -46,7 +46,8 @@ class Roster:
     {"default": id, "models": [{"id": "<exp>/<step>", "config": "pi05_rena_full", "dir": "<checkpoint dir>"}, ...]}
     A model with "boxes": true is also served as "<id>+boxes": its pick and place prompts get the target's box from
     Gemini once per trial (rena_policy.StaticBoxes, gemini_locate), which needs rena-autolabel's autolabel folder
-    importable and GEMINI_API_KEY set."""
+    importable and GEMINI_API_KEY set; with "wristboxes": true it is also served as "<id>+wristboxes", whose first
+    request of a trial gets the wrist camera's box too."""
 
     path: str
     # Where each Gemini answer is kept, with the frames it saw.
@@ -126,9 +127,12 @@ def create_roster(roster: Roster, *, default_prompt: str | None = None) -> tuple
         policy.infer(rena_policy.make_rena_example())
         logging.info("Loaded %s (%s) from %s", m["id"], m["config"], m["dir"])
         policies[m["id"]] = policy
-        if m.get("boxes"):
-            locate = locate or gemini_locate(pathlib.Path(roster.boxes_dir))
-            policies[f"{m['id']}+boxes"] = rena_policy.StaticBoxes(policy, locate, train_config.data.boxes_in)
+        for kind, wrist_first in (("boxes", False), ("wristboxes", True)):
+            if m.get(kind):
+                locate = locate or gemini_locate(pathlib.Path(roster.boxes_dir))
+                policies[f"{m['id']}+{kind}"] = rena_policy.StaticBoxes(
+                    policy, locate, train_config.data.boxes_in, wrist_first=wrist_first
+                )
     return policies, doc["default"]
 
 
