@@ -17,13 +17,18 @@ Outputs: actions [action_horizon, 7], and with the stage head's logits, stage_pr
 argmax, as rena-training's serving returns them.
 """
 
+from collections.abc import Callable
 import dataclasses
 import json
+import logging
 import pathlib
+import re
+import time
 from typing import Literal
 
 import einops
 import numpy as np
+from openpi_client import base_policy as _base_policy
 
 from openpi import transforms
 
@@ -133,3 +138,72 @@ class AutolabelPrompt(transforms.DataTransformFn):
                 data["prompt"], data["target_boxes"] = sample(rec, frame, rng)
         data["drop_state"] = bool(rng.random() < self.state_dropout)
         return data
+
+
+# The base cameras: fixed to the body, so a box from a trial's first frame holds until the object moves. The wrist
+# camera moves with the arm, so its box would be stale at once.
+STATIC_BOX_CAMERAS = ("image_0", "image_2")
+_PICK = re.compile(r"^pick (?P<obj>.+)$")
+_PLACE = re.compile(r"^place (?P<obj>.+) (?P<prep>in|on) (?P<dest>.+)$")
+_HAS_BOXES = re.compile(r" at (?:Right|Left|Wrist): <loc\d{4}>")
+
+
+def box_question(prompt: str) -> tuple[str, str] | None:
+    """(command, what) to ask a pointer for a skill prompt's target, as rena-autolabel's deploy boxes were asked: the
+    object for "pick X", the container for "place X in Y"; None for a whole task or a prompt that has its boxes."""
+    if " and place " in prompt or _HAS_BOXES.search(prompt):
+        return None
+    if m := _PLACE.match(prompt):
+        return f"place the {m['obj']} {m['prep']} the {m['dest']}", f"the {m['dest']}"
+    if m := _PICK.match(prompt):
+        return f"pick up the {m['obj']}", f"the {m['obj']}"
+    return None
+
+
+class StaticBoxes(_base_policy.BasePolicy):
+    """A rena policy whose pick and place skill prompts get the target's box on the base cameras, as training's box
+    prompts gave it: <loc> tokens after the prompt (boxes_in "text") or outlines RenaInputs draws (boxes_in "image").
+    The boxes come from `locate` (images by camera, command, what -> box or None by camera) once per trial, on its
+    first request, and stay for the rest of it. A trial starts when the prompt changes or after a pause in requests
+    longer than `new_trial_after_s` (a chunk runs for 2 s); other prompts pass through."""
+
+    def __init__(
+        self,
+        policy: _base_policy.BasePolicy,
+        locate: Callable[[dict[str, np.ndarray], str, str], dict[str, list[float] | None]],
+        boxes_in: Literal["text", "image"],
+        new_trial_after_s: float = 5.0,
+    ):
+        self._policy, self._locate, self._boxes_in = policy, locate, boxes_in
+        self._new_trial_after_s = new_trial_after_s
+        self._prompt: str | None = None
+        self._boxes: dict[str, list[float]] = {}
+        self._sizes: dict[str, tuple[int, int]] = {}
+        self._last = -np.inf
+
+    @property
+    def metadata(self) -> dict:
+        return self._policy.metadata
+
+    def infer(self, obs: dict) -> dict:
+        prompt = obs.get("prompt", "")
+        if (question := box_question(prompt)) is None:
+            return self._policy.infer(obs)
+        if prompt != self._prompt or time.monotonic() - self._last > self._new_trial_after_s:
+            images = {cam: np.asarray(obs[f"observation.images.{cam}"]) for cam in CAMERAS.values()}
+            found = self._locate(images, *question)
+            self._boxes = {cam: found[cam] for cam in STATIC_BOX_CAMERAS if found.get(cam)}
+            self._sizes = {cam: (images[cam].shape[1], images[cam].shape[0]) for cam in STATIC_BOX_CAMERAS}
+            self._prompt = prompt
+            logging.info("New trial %r: boxes %s", prompt, self._boxes)
+        obs = dict(obs)
+        if self._boxes_in == "text":
+            from autolabel_prompts import with_boxes
+
+            obs["prompt"] = with_boxes(prompt, self._boxes, self._sizes)
+        else:
+            obs["target_boxes"] = self._boxes
+        try:
+            return self._policy.infer(obs)
+        finally:
+            self._last = time.monotonic()
