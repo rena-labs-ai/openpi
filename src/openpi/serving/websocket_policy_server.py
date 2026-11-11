@@ -1,4 +1,5 @@
 import asyncio
+import concurrent.futures
 import http
 import json
 import logging
@@ -38,6 +39,9 @@ class WebsocketPolicyServer:
         self._default = default
         self._host = host
         self._port = port
+        # Inference runs off the event loop, which keeps answering keepalive pings through a slow request (a policy
+        # that asks a pointer first); one worker keeps the GPU's requests in order.
+        self._infer = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="infer")
         logging.getLogger("websockets.server").setLevel(logging.INFO)
 
     def serve_forever(self) -> None:
@@ -89,7 +93,7 @@ class WebsocketPolicyServer:
                 obs = _decode_jpeg_images(msgpack_numpy.unpackb(await websocket.recv()))
 
                 infer_time = time.monotonic()
-                action = policy.infer(obs)
+                action = await asyncio.get_running_loop().run_in_executor(self._infer, policy.infer, obs)
                 infer_time = time.monotonic() - infer_time
 
                 action["server_timing"] = {
