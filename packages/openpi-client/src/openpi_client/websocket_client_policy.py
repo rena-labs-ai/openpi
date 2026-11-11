@@ -84,3 +84,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
     @override
     def reset(self) -> None:
         pass
+
+    def close(self) -> None:
+        """An open connection's reader thread keeps the interpreter from exiting."""
+        self._ws.close()

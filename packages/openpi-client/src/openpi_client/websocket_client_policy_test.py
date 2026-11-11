@@ -38,7 +38,7 @@ def test_handshake_headers(kwargs, sent):
     with _server() as (uri, seen):
         policy = websocket_client_policy.WebsocketClientPolicy(uri, **kwargs)
         assert policy.get_server_metadata() == {"ok": True}
-        policy._ws.close()
+        policy.close()
     assert seen == [sent]
 
 
@@ -67,7 +67,7 @@ def test_a_gateway_502_is_retried_until_the_server_answers(monkeypatch):
         uri = f"ws://127.0.0.1:{server.socket.getsockname()[1]}"
         policy = websocket_client_policy.WebsocketClientPolicy(uri)
         assert policy.get_server_metadata() == {"ok": True}
-        policy._ws.close()
+        policy.close()
         server.shutdown()
     assert answers == [0, 1]
 
@@ -80,4 +80,21 @@ def test_a_refusal_is_not_retried():
         with pytest.raises(websockets.exceptions.InvalidStatus) as refused:
             websocket_client_policy.WebsocketClientPolicy(uri)
         assert refused.value.response.status_code == 404
+        server.shutdown()
+
+
+def test_close_ends_the_connection():
+    closed = threading.Event()
+
+    def handler(ws):
+        ws.send(msgpack_numpy.packb({"ok": True}))
+        with contextlib.suppress(websockets.exceptions.ConnectionClosed):
+            ws.recv()
+        closed.set()
+
+    with serve(handler, "127.0.0.1", 0) as server:
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        uri = f"ws://127.0.0.1:{server.socket.getsockname()[1]}"
+        websocket_client_policy.WebsocketClientPolicy(uri).close()
+        assert closed.wait(5)
         server.shutdown()
