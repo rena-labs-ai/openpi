@@ -1,4 +1,6 @@
 from collections.abc import Sequence
+import concurrent.futures
+import datetime
 import logging
 import pathlib
 import time
@@ -117,7 +119,9 @@ class Policy(BasePolicy):
 
 
 class PolicyRecorder(_base_policy.BasePolicy):
-    """Records the policy's behavior to disk."""
+    """Records each request the policy answers, with its reply and the time, to its own compressed file in record_dir,
+    <YYYYmmdd_HHMMSS_microseconds>.npz, so a restarted server adds to a record rather than overwriting it. Files are
+    written off the inference path, one at a time."""
 
     def __init__(self, policy: _base_policy.BasePolicy, record_dir: str):
         self._policy = policy
@@ -125,19 +129,17 @@ class PolicyRecorder(_base_policy.BasePolicy):
         logging.info(f"Dumping policy records to: {record_dir}")
         self._record_dir = pathlib.Path(record_dir)
         self._record_dir.mkdir(parents=True, exist_ok=True)
-        self._record_step = 0
+        self._writer = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="record")
 
     @override
     def infer(self, obs: dict) -> dict:  # type: ignore[misc]
         results = self._policy.infer(obs)
 
-        data = {"inputs": obs, "outputs": results}
-        data = flax.traverse_util.flatten_dict(data, sep="/")
+        data = flax.traverse_util.flatten_dict({"inputs": obs, "outputs": results, "time": time.time()}, sep="/")
+        data = {key: np.asarray(value) for key, value in data.items()}
+        output_path = self._record_dir / f"{datetime.datetime.now().astimezone().strftime('%Y%m%d_%H%M%S_%f')}.npz"
 
-        output_path = self._record_dir / f"step_{self._record_step}"
-        self._record_step += 1
-
-        np.save(output_path, np.asarray(data))
+        self._writer.submit(np.savez_compressed, output_path, **data)
         return results
 
     @property

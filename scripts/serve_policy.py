@@ -6,6 +6,7 @@ import pathlib
 import socket
 import time
 
+from openpi_client import base_policy as _base_policy
 import tyro
 
 from openpi.policies import policy as _policy
@@ -52,6 +53,8 @@ class Roster:
     path: str
     # Where each Gemini answer is kept, with the frames it saw.
     boxes_dir: str = "boxes"
+    # If set, every request each id answers is recorded in <record_dir>/<id>/ as the model got it, boxes included.
+    record_dir: str | None = None
 
 
 @dataclasses.dataclass
@@ -115,23 +118,29 @@ def create_policy(args: Args) -> _policy.Policy:
             return create_default_policy(args.env, default_prompt=args.default_prompt)
 
 
-def create_roster(roster: Roster, *, default_prompt: str | None = None) -> tuple[dict[str, _policy.Policy], str]:
+def create_roster(
+    roster: Roster, *, default_prompt: str | None = None
+) -> tuple[dict[str, _base_policy.BasePolicy], str]:
     """The roster's policies by id, each compiled on a client-shaped request before serving starts (a first request
     that compiled would outlast the client's ping timeout), and the default id."""
     doc = json.loads(pathlib.Path(roster.path).read_text())
     policies = {}
     locate = None
+
+    def recorded(policy: _policy.Policy, mid: str) -> _base_policy.BasePolicy:
+        return _policy.PolicyRecorder(policy, f"{roster.record_dir}/{mid}") if roster.record_dir else policy
+
     for m in doc["models"]:
         train_config = _config.get_config(m["config"])
         policy = _policy_config.create_trained_policy(train_config, m["dir"], default_prompt=default_prompt)
         policy.infer(rena_policy.make_rena_example())
         logging.info("Loaded %s (%s) from %s", m["id"], m["config"], m["dir"])
-        policies[m["id"]] = policy
+        policies[m["id"]] = recorded(policy, m["id"])
         for kind, wrist_first in (("boxes", False), ("wristboxes", True)):
             if m.get(kind):
                 locate = locate or gemini_locate(pathlib.Path(roster.boxes_dir))
                 policies[f"{m['id']}+{kind}"] = rena_policy.StaticBoxes(
-                    policy, locate, train_config.data.boxes_in, wrist_first=wrist_first
+                    recorded(policy, f"{m['id']}+{kind}"), locate, train_config.data.boxes_in, wrist_first=wrist_first
                 )
     return policies, doc["default"]
 
@@ -164,8 +173,8 @@ def main(args: Args) -> None:
     else:
         policies, default = {"default": create_policy(args)}, "default"
 
-    # Record the policy's behavior.
-    if args.record:
+    # Record the policy's behavior (a roster records with its own record_dir).
+    if args.record and not isinstance(args.policy, Roster):
         policies = {mid: _policy.PolicyRecorder(p, f"policy_records/{mid}") for mid, p in policies.items()}
 
     hostname = socket.gethostname()

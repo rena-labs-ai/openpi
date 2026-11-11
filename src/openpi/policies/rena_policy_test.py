@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 import numpy as np
 import pytest
 
@@ -36,7 +38,7 @@ def test_client_request_fills_the_three_slots_and_state():
 class _Seen:
     """A policy that keeps what it was asked, and a locate that counts its calls."""
 
-    metadata: dict = {}
+    metadata: ClassVar[dict] = {}
 
     def __init__(self):
         self.asked, self.located = [], []
@@ -104,3 +106,19 @@ def test_wrist_first_draws_the_wrist_box_on_the_first_request_only():
     _ask(boxed, "pick plush toy")
     assert seen.asked[0]["target_boxes"]["image_1"] == [0, 0, 1, 1]
     assert "image_1" not in seen.asked[1]["target_boxes"]
+
+
+def test_a_recorder_under_static_boxes_keeps_each_request_as_the_model_got_it(tmp_path):
+    pytest.importorskip("autolabel_prompts")
+    from openpi.policies import policy as _policy
+
+    seen = _Seen()
+    for _ in range(2):  # a restarted server records into the same folder
+        recorder = _policy.PolicyRecorder(seen, str(tmp_path))
+        _ask(rena_policy.StaticBoxes(recorder, seen.locate, "text"), "pick plush toy")
+        recorder._writer.shutdown(wait=True)  # noqa: SLF001
+    records = [np.load(f) for f in sorted(tmp_path.glob("*.npz"))]
+    assert len(records) == 2
+    assert all(str(r["inputs/prompt"]).startswith("pick plush toy at Right: <loc0512>") for r in records)
+    assert records[0]["inputs/observation.images.image_2"].shape == (640, 480, 3)
+    assert float(records[1]["time"]) >= float(records[0]["time"])
