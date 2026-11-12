@@ -373,6 +373,8 @@ class LeRobotRenaDataConfig(DataConfigFactory):
     boxes_in: Literal["text", "image"] = "text"
     # The episodes to use: all, or rena_split's train or holdout part.
     split: Literal["all", "train", "holdout"] = "all"
+    # Action norm stats over all steps of a chunk, or one per step, as scripts/compute_rena_norm_stats.py writes them.
+    action_norm: Literal["global", "per_timestep"] = "global"
     action_sequence_keys: Sequence[str] = ("action",)
 
     @override
@@ -408,8 +410,13 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             inputs=[rena_policy.RenaInputs(), _transforms.DeltaActions(delta_action_mask)],
             outputs=[_transforms.AbsoluteActions(delta_action_mask), rena_policy.RenaOutputs()],
         )
+        base = self.create_base_config(assets_dirs, model_config)
+        if base.norm_stats is not None and (base.norm_stats["actions"].q01.ndim == 2) != (
+            self.action_norm == "per_timestep"
+        ):
+            raise ValueError(f"{base.asset_id}'s action norm stats are not {self.action_norm}")
         return dataclasses.replace(
-            self.create_base_config(assets_dirs, model_config),
+            base,
             repack_transforms=repack_transform,
             data_transforms=data_transforms,
             model_transforms=ModelTransformFactory()(model_config),
@@ -630,6 +637,7 @@ def _rena(
     state: bool,
     boxes_in: Literal["text", "image"] = "text",
     split: Literal["all", "train", "holdout"] = "all",
+    action_norm: Literal["global", "per_timestep"] = "global",
 ) -> TrainConfig:
     """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
     stage head as rena-training trains it. With state, the state is in the prompt, left out of a fifth of training
@@ -645,6 +653,7 @@ def _rena(
             state_dropout=0.2 if state else 0.0,
             boxes_in=boxes_in,
             split=split,
+            action_norm=action_norm,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         stage_loss_weight=0.03,
@@ -866,6 +875,7 @@ _CONFIGS = [
     _rena("pi05_rena_boximg_nostate", state=False, boxes_in="image"),
     # Trained without rena_split's holdout, which scripts/eval_rena_holdout.py scores them on.
     _rena("pi05_rena_nostate_ho", state=False, split="train"),
+    _rena("pi05_rena_nostate_ho_pts", state=False, split="train", action_norm="per_timestep"),
     #
     # Fine-tuning Aloha configs.
     #
