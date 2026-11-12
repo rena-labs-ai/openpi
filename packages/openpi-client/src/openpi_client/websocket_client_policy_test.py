@@ -47,15 +47,19 @@ needs_respond = pytest.mark.skipif(
 )
 
 
+RUNPOD_BUSY = '{"status":400,"title":"Bad Request","detail":"failed to assign worker"}'
+
+
 @needs_respond
-def test_a_gateway_502_is_retried_until_the_server_answers(monkeypatch):
+@pytest.mark.parametrize(("status", "body"), [(502, "starting\n"), (400, RUNPOD_BUSY)])
+def test_a_server_not_ready_yet_is_retried_until_it_answers(monkeypatch, status, body):
     monkeypatch.setattr(websocket_client_policy.time, "sleep", lambda s: None)
     answers = []
 
     def process_request(connection, request):
         answers.append(len(answers))
         if len(answers) == 1:
-            return connection.respond(502, "starting\n")
+            return connection.respond(status, body)
         return None
 
     def handler(ws):
@@ -73,13 +77,14 @@ def test_a_gateway_502_is_retried_until_the_server_answers(monkeypatch):
 
 
 @needs_respond
-def test_a_refusal_is_not_retried():
-    with serve(lambda ws: None, "127.0.0.1", 0, process_request=lambda c, r: c.respond(404, "no\n")) as server:
+@pytest.mark.parametrize(("status", "body"), [(404, "no\n"), (400, '{"detail":"bad request"}')])
+def test_a_refusal_is_not_retried(status, body):
+    with serve(lambda ws: None, "127.0.0.1", 0, process_request=lambda c, r: c.respond(status, body)) as server:
         threading.Thread(target=server.serve_forever, daemon=True).start()
         uri = f"ws://127.0.0.1:{server.socket.getsockname()[1]}"
         with pytest.raises(websockets.exceptions.InvalidStatus) as refused:
             websocket_client_policy.WebsocketClientPolicy(uri)
-        assert refused.value.response.status_code == 404
+        assert refused.value.response.status_code == status
         server.shutdown()
 
 
