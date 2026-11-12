@@ -141,9 +141,15 @@ def create_torch_dataset(
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            key: [t / dataset_meta.fps for t in range(-data_config.action_lookback, action_horizon)]
+            for key in data_config.action_sequence_keys
         },
     )
+    if data_config.episodes is not None:
+        # LeRobotDataset(episodes=...) looks up episode bounds by episode index in a table it builds by position.
+        bounds = dataset.episode_data_index
+        frames = [i for ep in data_config.episodes for i in range(bounds["from"][ep].item(), bounds["to"][ep].item())]
+        dataset = torch.utils.data.Subset(dataset, frames)
 
     if data_config.prompt_from_task:
         dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])

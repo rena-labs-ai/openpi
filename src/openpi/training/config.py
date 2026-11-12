@@ -4,9 +4,11 @@ import abc
 from collections.abc import Sequence
 import dataclasses
 import difflib
+import json
 import logging
 import pathlib
 from typing import Any, Literal, Protocol, TypeAlias
+import zlib
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -89,6 +91,10 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+    # LeRobot episodes to train on; all when None.
+    episodes: Sequence[int] | None = None
+    # Steps before the frame that each action sequence also carries, for transforms that read earlier actions.
+    action_lookback: int = 0
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -365,12 +371,15 @@ class LeRobotRenaDataConfig(DataConfigFactory):
     state_dropout: float = 0.0
     # Where the target boxes reach the policy: as <loc> tokens in the prompt, or drawn on the camera images.
     boxes_in: Literal["text", "image"] = "text"
+    # The episodes to use: all, or rena_split's train or holdout part.
+    split: Literal["all", "train", "holdout"] = "all"
     action_sequence_keys: Sequence[str] = ("action",)
 
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         from lerobot.common.constants import HF_LEROBOT_HOME
 
+        labels = HF_LEROBOT_HOME / self.repo_id / "meta/autolabel.jsonl"
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -388,7 +397,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
                     }
                 ),
                 rena_policy.AutolabelPrompt(
-                    str(HF_LEROBOT_HOME / self.repo_id / "meta/autolabel.jsonl"),
+                    str(labels),
                     state_dropout=self.state_dropout,
                     boxes_in=self.boxes_in,
                 ),
@@ -405,7 +414,18 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=ModelTransformFactory()(model_config),
             action_sequence_keys=self.action_sequence_keys,
+            episodes=None if self.split == "all" else sorted(rena_split(labels)[self.split]),
         )
+
+
+def rena_split(labels_path: pathlib.Path | str) -> dict[str, set[int]]:
+    """rena-autolabel's episodes split by recording: about one in twenty held out, chosen by a hash of the recording's
+    source key, so a recording stays on its side when the dataset is rewritten with others."""
+    split = {"train": set(), "holdout": set()}
+    for line in pathlib.Path(labels_path).read_text().splitlines():
+        rec = json.loads(line)
+        split["holdout" if zlib.crc32(rec["source_key"].encode()) % 20 == 0 else "train"].add(rec["episode_index"])
+    return split
 
 
 @dataclasses.dataclass(frozen=True)
@@ -604,7 +624,13 @@ class TrainConfig:
             raise ValueError("Cannot resume and overwrite at the same time.")
 
 
-def _rena(name: str, *, state: bool, boxes_in: Literal["text", "image"] = "text") -> TrainConfig:
+def _rena(
+    name: str,
+    *,
+    state: bool,
+    boxes_in: Literal["text", "image"] = "text",
+    split: Literal["all", "train", "holdout"] = "all",
+) -> TrainConfig:
     """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
     stage head as rena-training trains it. With state, the state is in the prompt, left out of a fifth of training
     prompts; without, the model never sees it. Serving builds each model from the config it trained with."""
@@ -618,6 +644,7 @@ def _rena(name: str, *, state: bool, boxes_in: Literal["text", "image"] = "text"
             base_config=DataConfig(prompt_from_task=True),
             state_dropout=0.2 if state else 0.0,
             boxes_in=boxes_in,
+            split=split,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         stage_loss_weight=0.03,
@@ -837,6 +864,8 @@ _CONFIGS = [
     _rena("pi05_rena_full", state=True),
     _rena("pi05_rena_nostate", state=False),
     _rena("pi05_rena_boximg_nostate", state=False, boxes_in="image"),
+    # Trained without rena_split's holdout, which scripts/eval_rena_holdout.py scores them on.
+    _rena("pi05_rena_nostate_ho", state=False, split="train"),
     #
     # Fine-tuning Aloha configs.
     #

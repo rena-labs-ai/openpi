@@ -119,6 +119,8 @@ class AutolabelPrompt(transforms.DataTransformFn):
     labels_path: str
     state_dropout: float = 0.0
     boxes_in: Literal["text", "image"] = "text"
+    # Fixes each frame's draw, for evaluations that must give every model the same prompts.
+    seed: int | None = None
 
     def __post_init__(self):
         lines = pathlib.Path(self.labels_path).read_text().splitlines()
@@ -130,7 +132,8 @@ class AutolabelPrompt(transforms.DataTransformFn):
 
         data = dict(data)
         episode, frame = int(data.pop("episode_index")), int(data.pop("frame_index"))
-        rng = np.random.default_rng()  # fresh entropy: DataLoader workers share numpy's global seed
+        # fresh entropy by default: DataLoader workers share numpy's global seed
+        rng = np.random.default_rng(None if self.seed is None else (self.seed, episode, frame))
         if (rec := self._records.get(episode)) is not None:
             if self.boxes_in == "text":
                 data["prompt"] = prompt(rec, frame, rng)
