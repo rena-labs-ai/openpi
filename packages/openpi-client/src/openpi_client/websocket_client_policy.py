@@ -65,8 +65,7 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
                 logging.info("Still waiting for server...")
                 time.sleep(5)
             except websockets.exceptions.InvalidStatus as e:
-                # A gateway in front of a server still starting answers 502 or 504.
-                if e.response.status_code not in (502, 504):
+                if not _not_ready_yet(e.response):
                     raise
                 logging.info("Still waiting for server...")
                 time.sleep(5)
@@ -88,3 +87,11 @@ class WebsocketClientPolicy(_base_policy.BasePolicy):
     def close(self) -> None:
         """An open connection's reader thread keeps the interpreter from exiting."""
         self._ws.close()
+
+
+def _not_ready_yet(response) -> bool:
+    """A gateway answers 502 or 504 while its server starts, and RunPod 400 "failed to assign worker" while every
+    worker it may run is taken."""
+    if response.status_code in (502, 504):
+        return True
+    return response.status_code == 400 and b"failed to assign worker" in (response.body or b"")
