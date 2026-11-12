@@ -136,3 +136,28 @@ class AutolabelPrompt(transforms.DataTransformFn):
                 data["prompt"], data["target_boxes"] = sample(rec, frame, rng)
         data["drop_state"] = bool(rng.random() < self.state_dropout)
         return data
+
+
+@dataclasses.dataclass(frozen=True)
+class SplitPrevAction(transforms.DataTransformFn):
+    """Training's action sequence carries one step before the frame (DataConfig.action_lookback 1): that step's
+    command becomes observation.prev_action, as a client sends it, and the rest the actions. A repack transform."""
+
+    def __call__(self, data: dict) -> dict:
+        actions = np.asarray(data["actions"])
+        return {**data, "observation.prev_action": actions[..., 0, :], "actions": actions[..., 1:, :]}
+
+
+@dataclasses.dataclass(frozen=True)
+class AnchorOnCommand(transforms.DataTransformFn):
+    """The joint state replaced by the joint targets commanded the step before (observation.prev_action), so actions
+    are relative to the last command, not to where the arm sagged or lagged to; the gripper stays measured. The
+    policy's state is that command from here on, also in the outputs, where AbsoluteActions adds it back."""
+
+    def __call__(self, data: dict) -> dict:
+        data = dict(data)
+        prev = np.asarray(data.pop("observation.prev_action"), dtype=np.float32)
+        state = np.array(data["observation.state"], dtype=np.float32)
+        state[..., :6] = prev[..., :6]
+        data["observation.state"] = state
+        return data
