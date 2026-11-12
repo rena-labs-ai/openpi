@@ -373,6 +373,9 @@ class LeRobotRenaDataConfig(DataConfigFactory):
     boxes_in: Literal["text", "image"] = "text"
     # The episodes to use: all, or rena_split's train or holdout part.
     split: Literal["all", "train", "holdout"] = "all"
+    # What each chunk's joint actions are relative to: the measured joints at its first frame, or the joint targets
+    # commanded the step before (rena_policy.AnchorOnCommand), which carry no tracking lag or sag.
+    anchor: Literal["state", "command"] = "state"
     # Action norm stats over all steps of a chunk, or one per step, as scripts/compute_rena_norm_stats.py writes them.
     action_norm: Literal["global", "per_timestep"] = "global"
     action_sequence_keys: Sequence[str] = ("action",)
@@ -382,6 +385,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
         from lerobot.common.constants import HF_LEROBOT_HOME
 
         labels = HF_LEROBOT_HOME / self.repo_id / "meta/autolabel.jsonl"
+        command = self.anchor == "command"
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -403,11 +407,16 @@ class LeRobotRenaDataConfig(DataConfigFactory):
                     state_dropout=self.state_dropout,
                     boxes_in=self.boxes_in,
                 ),
+                *([rena_policy.SplitPrevAction()] if command else []),
             ]
         )
         delta_action_mask = _transforms.make_bool_mask(6, -1)
         data_transforms = _transforms.Group(
-            inputs=[rena_policy.RenaInputs(), _transforms.DeltaActions(delta_action_mask)],
+            inputs=[
+                *([rena_policy.AnchorOnCommand()] if command else []),
+                rena_policy.RenaInputs(),
+                _transforms.DeltaActions(delta_action_mask),
+            ],
             outputs=[_transforms.AbsoluteActions(delta_action_mask), rena_policy.RenaOutputs()],
         )
         base = self.create_base_config(assets_dirs, model_config)
@@ -422,6 +431,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             model_transforms=ModelTransformFactory()(model_config),
             action_sequence_keys=self.action_sequence_keys,
             episodes=None if self.split == "all" else sorted(rena_split(labels)[self.split]),
+            action_lookback=1 if command else 0,
         )
 
 
@@ -637,6 +647,7 @@ def _rena(
     state: bool,
     boxes_in: Literal["text", "image"] = "text",
     split: Literal["all", "train", "holdout"] = "all",
+    anchor: Literal["state", "command"] = "state",
     action_norm: Literal["global", "per_timestep"] = "global",
 ) -> TrainConfig:
     """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
@@ -653,6 +664,7 @@ def _rena(
             state_dropout=0.2 if state else 0.0,
             boxes_in=boxes_in,
             split=split,
+            anchor=anchor,
             action_norm=action_norm,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
@@ -876,6 +888,7 @@ _CONFIGS = [
     # Trained without rena_split's holdout, which scripts/eval_rena_holdout.py scores them on.
     _rena("pi05_rena_nostate_ho", state=False, split="train"),
     _rena("pi05_rena_nostate_ho_pts", state=False, split="train", action_norm="per_timestep"),
+    _rena("pi05_rena_nostate_ho_cmd", state=False, split="train", anchor="command"),
     #
     # Fine-tuning Aloha configs.
     #

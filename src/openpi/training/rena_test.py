@@ -3,10 +3,24 @@ import json
 import numpy as np
 
 from openpi import transforms as _transforms
+from openpi.policies import rena_policy
 from openpi.shared import normalize as _normalize
 from openpi.training import config as _config
 
 MASK = _transforms.make_bool_mask(6, -1)
+
+
+def test_command_anchor_makes_joint_actions_relative_to_the_last_command_and_back():
+    state = np.array([0.0, -1.0, 1.0, 0.5, 0.0, 0.0, 0.3], np.float32)
+    prev = np.array([0.1, -0.9, 1.1, 0.6, 0.1, 0.1, 0.9], np.float32)
+    chunk = np.stack([prev, prev + 0.2, prev + 0.4]).astype(np.float32)
+    data = rena_policy.AnchorOnCommand()(rena_policy.SplitPrevAction()({"observation.state": state, "actions": chunk}))
+    np.testing.assert_allclose(data["observation.state"], [0.1, -0.9, 1.1, 0.6, 0.1, 0.1, 0.3])
+    rel = _transforms.DeltaActions(MASK)({"state": data["observation.state"], "actions": np.array(data["actions"])})
+    np.testing.assert_allclose(rel["actions"][:, :6], [[0.2] * 6, [0.4] * 6], atol=1e-6)
+    np.testing.assert_allclose(rel["actions"][:, 6], [1.1, 1.3], atol=1e-6)
+    back = _transforms.AbsoluteActions(MASK)(rel)
+    np.testing.assert_allclose(back["actions"], chunk[1:], atol=1e-6)
 
 
 def test_per_timestep_stats_map_each_steps_quantiles_to_minus_one_and_one_and_round_trip():

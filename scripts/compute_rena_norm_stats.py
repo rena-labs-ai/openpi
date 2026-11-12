@@ -13,6 +13,7 @@ import numpy as np
 import pandas as pd
 import tyro
 
+import openpi.policies.rena_policy as rena_policy
 import openpi.shared.normalize as normalize
 import openpi.training.config as _config
 import openpi.transforms as _transforms
@@ -27,6 +28,8 @@ def chunks(state: np.ndarray, action: np.ndarray, horizon: int, lookback: int) -
 def model_view(state: np.ndarray, actions: np.ndarray, anchor: str) -> tuple[np.ndarray, np.ndarray]:
     """The state and actions the model sees, through the config's own transforms."""
     data = {"observation.state": state, "actions": actions}
+    if anchor == "command":
+        data = rena_policy.AnchorOnCommand()(rena_policy.SplitPrevAction()(data))
     out = _transforms.DeltaActions(_transforms.make_bool_mask(6, -1))(
         {"state": data["observation.state"], "actions": np.array(data["actions"], dtype=np.float32)}
     )
