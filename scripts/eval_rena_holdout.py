@@ -28,11 +28,13 @@ import openpi.transforms as _transforms
 EXECUTED = 10  # the steps of a chunk a robot runs before it asks again
 
 
-def prompt_kind(rec: dict, frame: int, seed: int) -> str:
+def prompt_kind(prompter: rena_policy.AutolabelPrompt, rec: dict, frame: int) -> str:
+    """The kind of prompt the seeded prompter gives the frame."""
     from autolabel_prompts import sample
     from autolabel_prompts import task_text
 
-    text, boxes = sample(rec, frame, np.random.default_rng((seed, rec["episode_index"], frame)))
+    rng = np.random.default_rng((prompter.seed, rec["episode_index"], frame))
+    text, boxes = sample(rec, frame, rng, prompter.mix)
     if boxes:
         return "boxes"
     return "task" if text in (rec["instruction"], task_text(rec)) else "skill"
@@ -67,9 +69,10 @@ def main(
         dataclasses.replace(t, seed=seed) if isinstance(t, rena_policy.AutolabelPrompt) else t
         for t in data_config.repack_transforms.inputs
     ]
-    labels = next(t for t in repack if isinstance(t, rena_policy.AutolabelPrompt)).labels_path
+    prompter = next(t for t in repack if isinstance(t, rena_policy.AutolabelPrompt))
     records = {
-        (rec := json.loads(line))["episode_index"]: rec for line in pathlib.Path(labels).read_text().splitlines()
+        (rec := json.loads(line))["episode_index"]: rec
+        for line in pathlib.Path(prompter.labels_path).read_text().splitlines()
     }
     inputs = _transforms.compose(
         [
@@ -105,7 +108,7 @@ def main(
             got = outputs({"state": s["state"], "actions": p})["actions"]
             errs.append(np.abs(got - want))
             rec = records[int(raw["episode_index"])]
-            kinds.append(prompt_kind(rec, int(raw["frame_index"]), seed))
+            kinds.append(prompt_kind(prompter, rec, int(raw["frame_index"])))
             sources.append(rec["dataset"])
         print(f"{min(start + batch_size, len(picks))}/{len(picks)}", flush=True)
 
