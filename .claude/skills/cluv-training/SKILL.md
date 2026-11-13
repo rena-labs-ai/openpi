@@ -54,6 +54,10 @@ cluv status                                    # GPUs free, cluv jobs
 
 ## Known problems
 
+- **Losing jobs are not always cancelled.** `cluv submit first` cancels the losers only while it is still running, and
+  its cancel has failed silently on Fir. Never wrap it in a timeout. After a job starts, run `squeue -u $USER` on
+  every cluster and `scancel` any leftover `cluv-cluv_train` job. Two copies of one run share a checkpoint folder, so
+  one of them crashes on save and can hang while it still holds its GPUs.
 - **Rebuilding a venv.** This happens after a lock change. The `evdev` package will not compile with DRAC's gcc
   unless it gets matching kernel headers. Mila's and Fir's home quotas are full. Run `uv sync` on the login node:
   `C_INCLUDE_PATH=$SCRATCH/evdev_inc` on Nibi and Rorqual, `$SCRATCH/evdev_inc_sys` on Fir, plus
