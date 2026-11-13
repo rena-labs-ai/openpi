@@ -15,7 +15,7 @@ config=$1 exp=$2
 shift 2
 data=$SCRATCH/rena-data
 ckpt=$SCRATCH/openpi-checkpoints
-export HF_LEROBOT_HOME=$data/lerobot_home OPENPI_DATA_HOME=$data/openpi_cache PYTHONPATH=$data/python
+export HF_LEROBOT_HOME=$data/lerobot_home OPENPI_DATA_HOME=$data/openpi_cache HF_HOME=$data/hf_cache PYTHONPATH=$data/python
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 PYTHONUNBUFFERED=1
 module load ffmpeg 2>/dev/null || true # the video decoder's libraries, on the DRAC clusters
 py=(uv run --no-sync python)
