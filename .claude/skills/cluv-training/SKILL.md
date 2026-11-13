@@ -40,7 +40,7 @@ cluv status                                    # GPUs free, cluv jobs
 
 - `openpi_cache` holds pi05_base and the tokenizer.
 - `python` holds `autolabel_prompts` and `rena_task_grammar`, which are on `PYTHONPATH`.
-- The script computes a config's norm stats on first use.
+- The script computes the config's norm stats at the start of every job, about a minute from the parquet files.
 
 ## GPUs
 

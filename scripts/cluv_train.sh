@@ -8,8 +8,8 @@
 # Each cluster holds the data in $SCRATCH/rena-data (the LeRobot dataset in lerobot_home, openpi's cache with pi05_base
 # and the tokenizer in openpi_cache, the pure-Python autolabel_prompts and rena_task_grammar in python) and the
 # checkpoints in $SCRATCH/openpi-checkpoints. The job shards the model over all the GPUs it got, resumes its own
-# checkpoints, so `cluv submit --chunking` can split it into short jobs, and writes the config's norm stats first when
-# this clone has none.
+# checkpoints, so `cluv submit --chunking` can split it into short jobs, and writes the config's norm stats first, from
+# whichever dataset the config names.
 set -euo pipefail
 config=$1 exp=$2
 shift 2
@@ -20,9 +20,7 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 PYTHONUNBUFFERED=1
 module load ffmpeg 2>/dev/null || true # the video decoder's libraries, on the DRAC clusters
 py=(uv run --no-sync python)
 
-if [ ! -e "assets/$config/rena/rena_autolabel_v2/norm_stats.json" ]; then
-    "${py[@]}" scripts/compute_rena_norm_stats.py --config-name "$config"
-fi
+"${py[@]}" scripts/compute_rena_norm_stats.py --config-name "$config"
 resume=()
 if ls "$ckpt/$config/$exp" 2>/dev/null | grep -qE '^[0-9]+$'; then resume=(--resume); fi
 gpus=$(nvidia-smi -L | wc -l)

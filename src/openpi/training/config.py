@@ -663,7 +663,7 @@ def _rena(
             pi05=True, action_horizon=50, num_stage_classes=7, discrete_state_input=state
         ),  # len(rena_task_grammar.STAGES)
         data=LeRobotRenaDataConfig(
-            repo_id="rena/rena_autolabel_v2",
+            repo_id="rena/rena_autolabel_v3",
             base_config=DataConfig(prompt_from_task=True),
             state_dropout=0.2 if state else 0.0,
             boxes_in=boxes_in,
