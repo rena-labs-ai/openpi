@@ -369,8 +369,8 @@ class LeRobotRenaDataConfig(DataConfigFactory):
 
     # Share of training frames whose prompt leaves the state out.
     state_dropout: float = 0.0
-    # Where the target boxes reach the policy: as <loc> tokens in the prompt, or drawn on the camera images.
-    boxes_in: Literal["text", "image"] = "text"
+    # Where the target boxes reach the policy: as <loc> tokens in the prompt, drawn on the camera images, or nowhere.
+    boxes_in: Literal["text", "image", "none"] = "text"
     # The episodes to use: all, or rena_split's train or holdout part.
     split: Literal["all", "train", "holdout"] = "all"
     # What each chunk's joint actions are relative to: the measured joints at its first frame, or the joint targets
@@ -645,7 +645,7 @@ def _rena(
     name: str,
     *,
     state: bool,
-    boxes_in: Literal["text", "image"] = "text",
+    boxes_in: Literal["text", "image", "none"] = "text",
     split: Literal["all", "train", "holdout"] = "all",
     anchor: Literal["state", "command"] = "state",
     action_norm: Literal["global", "per_timestep"] = "global",
@@ -885,10 +885,19 @@ _CONFIGS = [
     _rena("pi05_rena_full", state=True),
     _rena("pi05_rena_nostate", state=False),
     _rena("pi05_rena_boximg_nostate", state=False, boxes_in="image"),
-    # Trained without rena_split's holdout, which scripts/eval_rena_holdout.py scores them on.
-    _rena("pi05_rena_nostate_ho", state=False, split="train"),
-    _rena("pi05_rena_nostate_ho_pts", state=False, split="train", action_norm="per_timestep"),
-    _rena("pi05_rena_nostate_ho_cmd", state=False, split="train", anchor="command"),
+    # Without rena_split's holdout, which scripts/eval_rena_holdout.py scores them on; no state, actions relative to
+    # the last command with per-step norm stats; no target boxes, or boxes drawn on the images.
+    *(
+        _rena(
+            f"pi05_rena_ho_{boxes}",
+            state=False,
+            boxes_in=boxes_in,
+            split="train",
+            anchor="command",
+            action_norm="per_timestep",
+        )
+        for boxes, boxes_in in (("nobox", "none"), ("boximg", "image"))
+    ),
     #
     # Fine-tuning Aloha configs.
     #

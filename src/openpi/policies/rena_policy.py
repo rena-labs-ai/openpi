@@ -112,19 +112,26 @@ class AutolabelPrompt(transforms.DataTransformFn):
     (meta/autolabel.jsonl beside the dataset, autolabel_prompts.sample: the task, the skill, or the skill with the
     target's box per camera), and with probability state_dropout the state left out of the prompt (TokenizePrompt's
     drop_state). boxes_in "text" writes the boxes into the prompt as PaliGemma <loc> tokens, "image" passes them as
-    target_boxes for RenaInputs to draw. It is a repack transform, so it never runs at serving time.
+    target_boxes for RenaInputs to draw, "none" never draws a box prompt: the skill prompt takes its share. It is a
+    repack transform, so it never runs at serving time.
 
     autolabel_prompts (rena-autolabel/packages/autolabel-prompts) and rena_task_grammar must be importable."""
 
     labels_path: str
     state_dropout: float = 0.0
-    boxes_in: Literal["text", "image"] = "text"
+    boxes_in: Literal["text", "image", "none"] = "text"
     # Fixes each frame's draw, for evaluations that must give every model the same prompts.
     seed: int | None = None
 
     def __post_init__(self):
         lines = pathlib.Path(self.labels_path).read_text().splitlines()
         object.__setattr__(self, "_records", {(rec := json.loads(line))["episode_index"]: rec for line in lines})
+
+    @property
+    def mix(self):
+        from autolabel_prompts import Mix
+
+        return Mix(skill=Mix.skill + Mix.boxes, boxes=0.0) if self.boxes_in == "none" else Mix()
 
     def __call__(self, data: dict) -> dict:
         from autolabel_prompts import prompt
@@ -136,9 +143,9 @@ class AutolabelPrompt(transforms.DataTransformFn):
         rng = np.random.default_rng(None if self.seed is None else (self.seed, episode, frame))
         if (rec := self._records.get(episode)) is not None:
             if self.boxes_in == "text":
-                data["prompt"] = prompt(rec, frame, rng)
+                data["prompt"] = prompt(rec, frame, rng, self.mix)
             else:
-                data["prompt"], data["target_boxes"] = sample(rec, frame, rng)
+                data["prompt"], data["target_boxes"] = sample(rec, frame, rng, self.mix)
         data["drop_state"] = bool(rng.random() < self.state_dropout)
         return data
 
