@@ -601,6 +601,10 @@ class TrainConfig:
     save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
+    # Steps between scores on the data config's holdout (training.holdout), with the weights a checkpoint would save;
+    # 0 for none. The holdout is at most holdout_frames frames, spread evenly over it.
+    holdout_interval: int = 0
+    holdout_frames: int = 512
 
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
@@ -669,6 +673,7 @@ def _rena(
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         stage_loss_weight=0.03,
+        holdout_interval=1000 if split == "train" else 0,
         fsdp_devices=4,
         num_workers=8,
     )
