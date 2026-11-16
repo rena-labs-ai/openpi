@@ -8,6 +8,7 @@ from collections.abc import Callable
 import dataclasses
 import json
 import pathlib
+from typing import Literal
 
 import jax
 import numpy as np
@@ -71,10 +72,16 @@ def prompt_kind(prompter: rena_policy.AutolabelPrompt, rec: dict, frame: int) ->
 
 
 def load(
-    config: _config.TrainConfig, norm_stats: dict, *, batch_size: int, max_frames: int | None = None, seed: int = 0
+    config: _config.TrainConfig,
+    norm_stats: dict,
+    *,
+    batch_size: int,
+    max_frames: int | None = None,
+    seed: int = 0,
+    split: Literal["train", "holdout"] = "holdout",
 ) -> Holdout:
-    """Evenly spread frames of the config's holdout, at most max_frames, in whole batches."""
-    factory = dataclasses.replace(config.data, split="holdout")
+    """Evenly spread frames of the config's holdout (or of its train part), at most max_frames, in whole batches."""
+    factory = dataclasses.replace(config.data, split=split)
     data_config = factory.create(config.assets_dirs, config.model)
     repack = [
         dataclasses.replace(t, seed=seed) if isinstance(t, rena_policy.AutolabelPrompt) else t
