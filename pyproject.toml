@@ -165,7 +165,7 @@ sbatch_args = [
     { partition = "long", gres = "gpu:a100l:2", exclude = "cn-g028" },
 ]  # cn-g028: both runs failed there within two minutes of a requeue (2026-11-17)
 
-# Out of the race on 2026-11-17: nibi does not answer ssh, and fir's shell has no Slurm or $SCRATCH.
+# Out of the race on 2026-11-17: nibi's session needs `cluv login`, and fir's shell has no Slurm or $SCRATCH.
 # [tool.cluv.clusters.nibi]
 # env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
 # sbatch_args = [
