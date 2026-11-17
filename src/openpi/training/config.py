@@ -890,18 +890,22 @@ _CONFIGS = [
     _rena("pi05_rena_full", state=True),
     _rena("pi05_rena_nostate", state=False),
     _rena("pi05_rena_boximg_nostate", state=False, boxes_in="image"),
-    # Without rena_split's holdout, which scripts/eval_rena_holdout.py scores them on; no state, actions relative to
-    # the last command with per-step norm stats; no target boxes, or boxes drawn on the images.
+    # Without rena_split's holdout, which scripts/eval_rena_holdout.py scores them on; actions relative to the last
+    # command with per-step norm stats; no target boxes, or boxes drawn on the images, and the last with the state.
     *(
         _rena(
-            f"pi05_rena_ho_{boxes}",
-            state=False,
+            name,
+            state=state,
             boxes_in=boxes_in,
             split="train",
             anchor="command",
             action_norm="per_timestep",
         )
-        for boxes, boxes_in in (("nobox", "none"), ("boximg", "image"))
+        for name, boxes_in, state in (
+            ("pi05_rena_ho_nobox", "none", False),
+            ("pi05_rena_ho_boximg", "image", False),
+            ("pi05_rena_ho_boximg_state", "image", True),
+        )
     ),
     #
     # Fine-tuning Aloha configs.
