@@ -22,7 +22,11 @@ py=(uv run --no-sync python)
 
 "${py[@]}" scripts/compute_rena_norm_stats.py --config-name "$config"
 resume=()
-if ls "$ckpt/$config/$exp" 2>/dev/null | grep -qE '^[0-9]+$'; then resume=(--resume); fi
+if ls "$ckpt/$config/$exp" 2>/dev/null | grep -qE '^[0-9]+$'; then
+    resume=(--resume)
+elif [ -d "$ckpt/$config/$exp" ]; then
+    resume=(--overwrite) # a run requeued before its first checkpoint left only its folder
+fi
 gpus=$(nvidia-smi -L | wc -l)
 nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 exec "${py[@]}" scripts/train.py "$config" --exp-name="$exp" --fsdp-devices="$gpus" --checkpoint-base-dir="$ckpt" \
