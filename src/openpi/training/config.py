@@ -890,21 +890,23 @@ _CONFIGS = [
     _rena("pi05_rena_full", state=True),
     _rena("pi05_rena_nostate", state=False),
     _rena("pi05_rena_boximg_nostate", state=False, boxes_in="image"),
-    # Without rena_split's holdout, which scripts/eval_rena_holdout.py scores them on; actions relative to the last
-    # command with per-step norm stats; no target boxes, or boxes drawn on the images, and the last with the state.
+    # Without rena_split's holdout, which scripts/eval_rena_holdout.py scores them on, with per-step action norm
+    # stats: no target boxes or boxes drawn on the images, actions relative to the last command; then the boxes run
+    # with the state in the prompt, and with actions relative to the measured joints instead.
     *(
         _rena(
             name,
             state=state,
             boxes_in=boxes_in,
             split="train",
-            anchor="command",
+            anchor=anchor,
             action_norm="per_timestep",
         )
-        for name, boxes_in, state in (
-            ("pi05_rena_ho_nobox", "none", False),
-            ("pi05_rena_ho_boximg", "image", False),
-            ("pi05_rena_ho_boximg_state", "image", True),
+        for name, boxes_in, state, anchor in (
+            ("pi05_rena_ho_nobox", "none", False, "command"),
+            ("pi05_rena_ho_boximg", "image", False, "command"),
+            ("pi05_rena_ho_boximg_state", "image", True, "command"),
+            ("pi05_rena_ho_boximg_anchorstate", "image", False, "state"),
         )
     ),
     #
