@@ -161,25 +161,26 @@ open-mode = "append"  # a requeued job adds to its log instead of writing over i
 [tool.cluv.clusters.mila]
 env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
 sbatch_args = [
-    { partition = "long", gres = "gpu:l40s:4", cpus-per-task = 24, mem = "192G" },
-    { partition = "long", gres = "gpu:a100l:2" },
-]
+    { partition = "long", gres = "gpu:l40s:4", cpus-per-task = 24, mem = "192G", exclude = "cn-g028" },
+    { partition = "long", gres = "gpu:a100l:2", exclude = "cn-g028" },
+]  # cn-g028: both runs failed there within two minutes of a requeue (2026-11-17)
 
-[tool.cluv.clusters.nibi]
-env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
-sbatch_args = [
-    { account = "def-kdarvish", gpus-per-node = "h100:2" },
-    { account = "rrg-bengioy-ad", gpus-per-node = "h100:2" },
-    { account = "def-gberseth", gpus-per-node = "h100:2" },
-]
+# Out of the race on 2026-11-17: nibi does not answer ssh, and fir's shell has no Slurm or $SCRATCH.
+# [tool.cluv.clusters.nibi]
+# env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
+# sbatch_args = [
+#     { account = "def-kdarvish", gpus-per-node = "h100:2" },
+#     { account = "rrg-bengioy-ad", gpus-per-node = "h100:2" },
+#     { account = "def-gberseth", gpus-per-node = "h100:2" },
+# ]
 
-[tool.cluv.clusters.fir]
-env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
-sbatch_args = [
-    { account = "def-kdarvish", gpus-per-node = "h100:2" },
-    { account = "rrg-bengioy-ad", gpus-per-node = "h100:2" },
-    { account = "def-gberseth", gpus-per-node = "h100:2" },
-]
+# [tool.cluv.clusters.fir]
+# env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
+# sbatch_args = [
+#     { account = "def-kdarvish", gpus-per-node = "h100:2" },
+#     { account = "rrg-bengioy-ad", gpus-per-node = "h100:2" },
+#     { account = "def-gberseth", gpus-per-node = "h100:2" },
+# ]
 
 [tool.cluv.clusters.rorqual]
 sbatch_args = [
