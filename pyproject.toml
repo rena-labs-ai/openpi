@@ -162,7 +162,7 @@ open-mode = "append"  # a requeued job adds to its log instead of writing over i
 env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
 sbatch_args = [
     { partition = "long", gres = "gpu:l40s:4", cpus-per-task = 24, mem = "192G", exclude = "cn-g028" },
-    { partition = "long", gres = "gpu:a100l:2", exclude = "cn-g028" },
+    { partition = "long", gres = "gpu:a100l:2", mem = "192G", exclude = "cn-g028" },
 ]  # cn-g028: both runs failed there within two minutes of a requeue (2026-11-17)
 
 # Out of the race on 2026-11-17: nibi's session needs `cluv login`, and fir's shell has no Slurm or $SCRATCH.
@@ -183,10 +183,11 @@ sbatch_args = [
 # ]
 
 [tool.cluv.clusters.rorqual]
+# Half a node: a checkpoint save went past the job script's 128G (2026-11-17).
 sbatch_args = [
-    { account = "rrg-bengioy-ad", gpus-per-node = "h100:2" },
-    { account = "rrg-gberseth", gpus-per-node = "h100:2" },
-    { account = "def-gberseth", gpus-per-node = "h100:2" },
-    { account = "def-kdarvish", gpus-per-node = "h100:2" },
+    { account = "rrg-bengioy-ad", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G" },
+    { account = "rrg-gberseth", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G" },
+    { account = "def-gberseth", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G" },
+    { account = "def-kdarvish", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G" },
 ]
 # Not yet: narval's A100s have 40GB, which full fine-tuning has not been tried on, and tamia cannot reach GitHub.
