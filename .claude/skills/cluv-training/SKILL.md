@@ -57,7 +57,11 @@ cluv status                                    # GPUs free, cluv jobs
 - **Losing jobs are not always cancelled.** `cluv submit first` cancels the losers only while it is still running, and
   its cancel has failed silently on Fir. Never wrap it in a timeout. After a job starts, run `squeue -u $USER` on
   every cluster and `scancel` any leftover `cluv-cluv_train` job. Two copies of one run share a checkpoint folder, so
-  one of them crashes on save and can hang while it still holds its GPUs.
+  one of them crashes on save and can hang while it still holds its GPUs. If the local machine stops mid-race, no
+  loser is cancelled, so check the queues the same way.
+- **A run resumes only on the GPU count it saved with.** A checkpoint saved on 2 GPUs fails to restore on 4 with
+  `Sharding passed to pjit does not match`. Mila races 4× L40S against 2× A100L, so a requeue or a second race can
+  put a run that has checkpoints on the wrong allocation.
 - **Rebuilding a venv.** This happens after a lock change. The `evdev` package will not compile with DRAC's gcc
   unless it gets matching kernel headers. Mila's and Fir's home quotas are full. Run `uv sync` on the login node:
   `C_INCLUDE_PATH=$SCRATCH/evdev_inc` on Nibi and Rorqual, `$SCRATCH/evdev_inc_sys` on Fir, plus
