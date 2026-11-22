@@ -29,6 +29,7 @@ import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
 import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
+import openpi.training.rena_stepped as rena_stepped
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
@@ -383,6 +384,8 @@ class LeRobotRenaDataConfig(DataConfigFactory):
     anchor: Literal["state", "command"] = "state"
     # Action norm stats over all steps of a chunk, or one per step, as scripts/compute_rena_norm_stats.py writes them.
     action_norm: Literal["global", "per_timestep"] = "global"
+    # Leave the recordings whose joint commands step (rena_stepped) out of training; the holdout keeps them.
+    drop_stepped: bool = False
     action_sequence_keys: Sequence[str] = ("action",)
 
     @override
@@ -390,6 +393,11 @@ class LeRobotRenaDataConfig(DataConfigFactory):
         from lerobot.common.constants import HF_LEROBOT_HOME
 
         labels = HF_LEROBOT_HOME / self.repo_id / "meta/autolabel.jsonl"
+        split = rena_split(labels)
+        episodes = None if self.split == "all" else split[self.split]
+        if self.drop_stepped and self.split != "holdout":
+            kept = split["train"] | split["holdout"] if episodes is None else episodes
+            episodes = kept - rena_stepped.stepped_episodes(HF_LEROBOT_HOME / self.repo_id)
         command = self.anchor == "command"
         repack_transform = _transforms.Group(
             inputs=[
@@ -435,7 +443,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             data_transforms=data_transforms,
             model_transforms=ModelTransformFactory()(model_config),
             action_sequence_keys=self.action_sequence_keys,
-            episodes=None if self.split == "all" else sorted(rena_split(labels)[self.split]),
+            episodes=None if episodes is None else sorted(episodes),
             action_lookback=1 if command else 0,
         )
 
@@ -666,6 +674,8 @@ def _rena(
     split: Literal["all", "train", "holdout"] = "all",
     anchor: Literal["state", "command"] = "state",
     action_norm: Literal["global", "per_timestep"] = "global",
+    repo_id: str = "rena/rena_autolabel_v3",
+    drop_stepped: bool = False,
 ) -> TrainConfig:
     """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
     stage head as rena-training trains it. With state, the state is in the prompt, left out of a fifth of training
@@ -676,13 +686,14 @@ def _rena(
             pi05=True, action_horizon=50, num_stage_classes=7, discrete_state_input=state
         ),  # len(rena_task_grammar.STAGES)
         data=LeRobotRenaDataConfig(
-            repo_id="rena/rena_autolabel_v3",
+            repo_id=repo_id,
             base_config=DataConfig(prompt_from_task=True),
             state_dropout=0.2 if state else 0.0,
             boxes_in=boxes_in,
             split=split,
             anchor=anchor,
             action_norm=action_norm,
+            drop_stepped=drop_stepped,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         stage_loss_weight=0.03,
@@ -920,6 +931,15 @@ _CONFIGS = [
             ("pi05_rena_ho_boximg", "image", False, "command"),
             ("pi05_rena_ho_boximg_state", "image", True, "command"),
             ("pi05_rena_ho_boximg_anchorstate", "image", False, "state"),
+        )
+    ),
+    # pi05_rena_ho_boximg without the recordings whose joint commands step, or with them interpolated
+    # (scripts/write_rena_interp_dataset.py writes rena_autolabel_v3_interp).
+    *(
+        _rena(name, state=False, boxes_in="image", split="train", anchor="command", action_norm="per_timestep", **kw)
+        for name, kw in (
+            ("pi05_rena_ho_boximg_nostepped", {"drop_stepped": True}),
+            ("pi05_rena_ho_boximg_interp", {"repo_id": "rena/rena_autolabel_v3_interp"}),
         )
     ),
     #
