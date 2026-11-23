@@ -142,6 +142,49 @@ class FASTTokenizer:
         return self._paligemma_tokenizer.vocab_size() - 1 - self._fast_skip_tokens - tokens
 
 
+def ki_fast_ids(ids: np.ndarray) -> np.ndarray:
+    """FAST ids to PaliGemma ids and back, as knowledge insulation places them: 253952-255999, just below PaliGemma's
+    1024 <loc> and 128 <seg> tokens (257152 - 1 - 1152 - id), which box targets use."""
+    return 255_999 - np.asarray(ids)
+
+
+class KITargetTokenizer:
+    """Knowledge insulation's targets for the backbone after the prompt: the annotation text ending in a newline, where
+    annotation decoding stops, then the action chunk's tokens from the universal FAST tokenizer, mapped to PaliGemma
+    ids just below <loc0000>, and the end of sequence."""
+
+    def __init__(self, max_len: int, fast_tokenizer_path: str = "physical-intelligence/fast"):
+        self._max_len = max_len
+        path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
+        with path.open("rb") as f:
+            self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+        self._fast_tokenizer = AutoProcessor.from_pretrained(fast_tokenizer_path, trust_remote_code=True)
+        self.end_of_annotation = self._tokenizer.piece_to_id("\n")
+
+    def tokenize(self, annotation: str | None, actions: np.ndarray | None) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Target tokens [max_len], their mask, and which are FAST tokens (the end of sequence after them included)."""
+        tokens = [] if annotation is None else [*self._tokenizer.encode(annotation), self.end_of_annotation]
+        n_text = len(tokens)
+        if actions is not None:
+            tokens += [*self.fast_ids(actions).tolist(), self._tokenizer.eos_id()]
+        if len(tokens) > self._max_len:
+            logging.warning(f"Target length ({len(tokens)}) exceeds max_target_len ({self._max_len}), truncating.")
+            tokens = tokens[: self._max_len]
+        pad = self._max_len - len(tokens)
+        is_fast = np.arange(self._max_len) >= n_text
+        mask = np.arange(self._max_len) < len(tokens)
+        return np.asarray(tokens + [0] * pad), mask, is_fast & mask
+
+    def fast_ids(self, actions: np.ndarray) -> np.ndarray:
+        """An action chunk [horizon, dim] as PaliGemma ids."""
+        return ki_fast_ids(self._fast_tokenizer(actions[None])[0])
+
+    def fast_actions(self, ids: np.ndarray, horizon: int, dim: int) -> np.ndarray:
+        """The action chunk [horizon, dim] that PaliGemma ids from fast_ids stand for."""
+        fast = ki_fast_ids(ids).tolist()
+        return self._fast_tokenizer.decode([fast], time_horizon=horizon, action_dim=dim)[0]
+
+
 ###########################################################################
 ## The tokenizers below are used for RoboArena baseline implementations. ##
 ## They are *not* used for pi0-style models.                             ##
