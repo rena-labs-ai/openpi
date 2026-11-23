@@ -13,6 +13,13 @@ import openpi.shared.download as download
 logger = logging.getLogger(__name__)
 
 
+# PaliGemma pt-224. Google's bucket no longer serves it anonymously, so a machine without it in its openpi cache needs the
+# same file from Hugging Face (google/paligemma-3b-pt-224, paligemma-3b-pt-224.npz) copied to its cached path.
+PALIGEMMA_PARAMS = "gs://vertex-model-garden-paligemma-us/paligemma/pt_224.npz"
+# The vocabulary's 1024 <loc> and 128 <seg> tokens start here.
+PALIGEMMA_LOCS = 256_000
+
+
 @runtime_checkable
 class WeightLoader(Protocol):
     def load(self, params: at.Params) -> at.Params:
@@ -46,10 +53,20 @@ class CheckpointWeightLoader(WeightLoader):
     """
 
     params_path: str
+    # Put PaliGemma pt-224's <loc>/<seg> embedding rows back, which pi05_base rewrote, so <loc> tokens mean image
+    # coordinates again for box targets.
+    paligemma_locs: bool = False
 
     def load(self, params: at.Params) -> at.Params:
         # We are loading np.ndarray and relying on the training code to properly convert and shard the params.
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
+        if self.paligemma_locs:
+            embedder = loaded_params["PaliGemma"]["llm"]["embedder"]
+            path = download.maybe_download(PALIGEMMA_PARAMS, gs={"token": "anon"})
+            with path.open("rb") as f:
+                rows = np.load(f, allow_pickle=False)["params/llm/embedder/input_embedding"][PALIGEMMA_LOCS:]
+            table = embedder["input_embedding"]
+            embedder["input_embedding"] = np.concatenate([table[:PALIGEMMA_LOCS], rows.astype(table.dtype)])
         # Add all missing LoRA + stage-head weights (left at fresh init via the strip in _load_weights_and_validate).
         return _merge_params(loaded_params, params, missing_regex=".*lora.*|.*stage_head.*")
 
@@ -63,9 +80,7 @@ class PaliGemmaWeightLoader(WeightLoader):
     """
 
     def load(self, params: at.Params) -> at.Params:
-        path = download.maybe_download(
-            "gs://vertex-model-garden-paligemma-us/paligemma/pt_224.npz", gs={"token": "anon"}
-        )
+        path = download.maybe_download(PALIGEMMA_PARAMS, gs={"token": "anon"})
         with path.open("rb") as f:
             flat_params = dict(np.load(f, allow_pickle=False))
         loaded_params = {"PaliGemma": flax.traverse_util.unflatten_dict(flat_params, sep="/")["params"]}

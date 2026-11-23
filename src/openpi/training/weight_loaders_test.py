@@ -4,6 +4,10 @@ import flax.traverse_util as tu
 import jax
 import numpy as np
 
+import openpi.models.model as _model
+import openpi.shared.download as download
+from openpi.training.weight_loaders import PALIGEMMA_PARAMS
+from openpi.training.weight_loaders import CheckpointWeightLoader
 from openpi.training.weight_loaders import _merge_params
 
 
@@ -35,3 +39,21 @@ def test_new_regex_backfills_stage_head_and_lora():
     # lora and stage_head backfilled from reference as ShapeDtypeStruct (later stripped → left at init).
     assert isinstance(flat["llm/lora/a"], jax.ShapeDtypeStruct)
     assert isinstance(flat["stage_head_in/kernel"], jax.ShapeDtypeStruct)
+
+
+def test_paligemma_locs_puts_back_the_loc_and_seg_rows_only(tmp_path, monkeypatch):
+    pi05 = np.zeros((257_152, 2), np.float32)
+    paligemma = np.arange(257_152 * 2, dtype=np.float32).reshape(-1, 2)
+    np.savez(tmp_path / "pt_224.npz", **{"params/llm/embedder/input_embedding": paligemma})
+    monkeypatch.setattr(
+        _model, "restore_params", lambda *_, **__: {"PaliGemma": {"llm": {"embedder": {"input_embedding": pi05}}}}
+    )
+    monkeypatch.setattr(
+        download, "maybe_download", lambda url, **_: tmp_path / "pt_224.npz" if url == PALIGEMMA_PARAMS else url
+    )
+    ref = {"PaliGemma": {"llm": {"embedder": {"input_embedding": jax.ShapeDtypeStruct(pi05.shape, np.float32)}}}}
+    table = CheckpointWeightLoader("ckpt", paligemma_locs=True).load(ref)["PaliGemma"]["llm"]["embedder"][
+        "input_embedding"
+    ]
+    assert (table[:256_000] == 0).all()
+    assert (table[256_000:] == paligemma[256_000:]).all()
