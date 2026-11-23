@@ -737,6 +737,8 @@ def _rena(
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params", paligemma_locs=knowledge_insulation
         ),
+        # Knowledge insulation clips and steps the backbone and the expert apart (optimizer.AdamW.expert_lr_scale).
+        optimizer=_optimizer.AdamW(expert_lr_scale=1.0 if knowledge_insulation else None),
         stage_loss_weight=0.03,
         holdout_interval=1000 if split == "train" else 0,
         fsdp_devices=4,
