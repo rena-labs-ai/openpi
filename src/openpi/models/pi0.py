@@ -432,3 +432,49 @@ class Pi0(_model.BaseModel):
         stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
         return x_0, stage_logits
 
+    def decode_annotation(
+        self, observation: _model.Observation, *, end_token: int, max_tokens: int = 48
+    ) -> at.Int[at.Array, "b n"]:
+        """The backbone's annotation of the observation, decoded greedily after the prompt with a KV cache, as knowledge
+        insulation trained it: tokens [b, max_tokens], each sample's up to and including end_token, then zeros. The
+        caller reads the boxes from the <loc> tokens, draws them and samples actions with them."""
+        observation = _model.preprocess_observation(None, observation, train=False)
+        prefix_tokens, prefix_mask, prefix_ar_mask, n_img_tokens = self.embed_prefix(observation)
+        (prefix_out, _), (k, v) = self.PaliGemma.llm(
+            [prefix_tokens, None],
+            mask=make_attn_mask(prefix_mask, prefix_ar_mask),
+            positions=jnp.cumsum(prefix_mask, axis=1) - 1,
+        )
+        batch_size, n_prefix = prefix_mask.shape
+        last_prompt = n_img_tokens + jnp.sum(observation.tokenized_prompt_mask, axis=1) - 1
+        first = jnp.argmax(
+            self.PaliGemma.llm(prefix_out[jnp.arange(batch_size), last_prompt][:, None], method="deembed"), -1
+        )
+        tokens = jnp.zeros((batch_size, max_tokens), jnp.int32).at[:, 0].set(first[:, 0])
+        # Slots after the prefix's for the decoded tokens' keys and values, so the loop keeps its shapes.
+        slots = ((0, 0), (0, 0), (0, max_tokens), (0, 0), (0, 0))
+        k, v = jnp.pad(k, slots), jnp.pad(v, slots)
+        n_valid = jnp.sum(prefix_mask, axis=1)
+
+        def step(carry):
+            i, tokens, k, v, done = carry
+            decoded = jnp.broadcast_to(jnp.arange(max_tokens) < i, (batch_size, max_tokens))
+            mask = jnp.concatenate([prefix_mask, decoded, jnp.ones((batch_size, 1), jnp.bool_)], axis=1)
+            (out, _), (k_all, v_all) = self.PaliGemma.llm(
+                [self.PaliGemma.llm(tokens[:, i, None], method="embed"), None],
+                mask=mask[:, None],
+                positions=(n_valid + i)[:, None],
+                kv_cache=(k, v),
+            )
+            k = jax.lax.dynamic_update_slice_in_dim(k, k_all[:, :, -1:], n_prefix + i, axis=2)
+            v = jax.lax.dynamic_update_slice_in_dim(v, v_all[:, :, -1:], n_prefix + i, axis=2)
+            nxt = jnp.argmax(self.PaliGemma.llm(out, method="deembed")[:, -1], axis=-1)
+            tokens = tokens.at[:, i + 1].set(jnp.where(done, 0, nxt))
+            return i + 1, tokens, k, v, done | (nxt == end_token)
+
+        def cond(carry):
+            i, _, _, _, done = carry
+            return (i < max_tokens - 1) & ~jnp.all(done)
+
+        _, tokens, _, _, _ = jax.lax.while_loop(cond, step, (0, tokens, k, v, tokens[:, 0] == end_token))
+        return tokens
