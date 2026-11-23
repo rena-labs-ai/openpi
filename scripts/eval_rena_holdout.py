@@ -7,6 +7,7 @@ the commanded ones, per step of the chunk, with the checkpoint's norm stats and 
 
 import json
 import pathlib
+from typing import Literal
 
 import jax
 import jax.numpy as jnp
@@ -28,11 +29,12 @@ def main(
     seed: int = 0,
     batch_size: int = 32,
     num_steps: int = 10,
+    split: Literal["holdout", "site"] = "holdout",
 ) -> None:
     config = _config.get_config(config_name)
     asset_id = config.data.create(config.assets_dirs, config.model).asset_id
     norm_stats = _checkpoints.load_norm_stats(checkpoint / "assets", asset_id)
-    holdout = _holdout.load(config, norm_stats, batch_size=batch_size, max_frames=max_frames, seed=seed)
+    holdout = _holdout.load(config, norm_stats, batch_size=batch_size, max_frames=max_frames, seed=seed, split=split)
     model = config.model.load(_model.restore_params(checkpoint / "params", dtype=jnp.bfloat16))
     sample_actions = nnx_utils.module_jit(model.sample_actions)
     rngs = jax.random.split(jax.random.key(seed), len(holdout.batches))
@@ -44,6 +46,7 @@ def main(
         "config": config_name,
         "checkpoint": str(checkpoint),
         "seed": seed,
+        "split": split,
         "num_steps": num_steps,
         **holdout.report(holdout.errors(predicted)),
     }

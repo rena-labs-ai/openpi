@@ -78,7 +78,7 @@ def load(
     batch_size: int,
     max_frames: int | None = None,
     seed: int = 0,
-    split: Literal["train", "holdout"] = "holdout",
+    split: Literal["train", "holdout", "site"] = "holdout",
 ) -> Holdout:
     """Evenly spread frames of the config's holdout (or of its train part), at most max_frames, in whole batches."""
     factory = dataclasses.replace(config.data, split=split)

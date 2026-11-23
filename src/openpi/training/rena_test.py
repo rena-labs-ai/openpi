@@ -38,13 +38,29 @@ def test_per_timestep_stats_map_each_steps_quantiles_to_minus_one_and_one_and_ro
 def test_rena_split_holds_out_about_one_in_twenty_recordings_by_source_key(tmp_path):
     labels = tmp_path / "autolabel.jsonl"
     labels.write_text(
-        "\n".join(json.dumps({"episode_index": i, "source_key": f"robot/task/ep_{i}"}) for i in range(2000))
+        "\n".join(json.dumps({"episode_index": i, "source_key": f"robot/task/ep_{i}", "dataset": "lab/a"}) for i in range(2000))
     )
     split = _config.rena_split(labels)
     assert split["train"].isdisjoint(split["holdout"])
     assert split["train"] | split["holdout"] == set(range(2000))
     assert 60 <= len(split["holdout"]) <= 140
     labels.write_text(
-        "\n".join(json.dumps({"episode_index": 5000 + i, "source_key": f"robot/task/ep_{i}"}) for i in range(2000))
+        "\n".join(json.dumps({"episode_index": 5000 + i, "source_key": f"robot/task/ep_{i}", "dataset": "lab/a"}) for i in range(2000))
     )
     assert {i - 5000 for i in _config.rena_split(labels)["holdout"]} == split["holdout"]
+
+
+def test_rena_split_holds_a_site_out_whole_and_leaves_the_rest_as_it_was(tmp_path):
+    labels = tmp_path / "autolabel.jsonl"
+    labels.write_text(
+        "\n".join(
+            json.dumps({"episode_index": i, "source_key": f"robot/task/ep_{i}", "dataset": f"deployment/{i % 3}"})
+            for i in range(600)
+        )
+    )
+    plain = _config.rena_split(labels)
+    split = _config.rena_split(labels, ("deployment/0",))
+    assert split["site"] == {i for i in range(600) if i % 3 == 0}
+    assert split["train"] == plain["train"] - split["site"]
+    assert split["holdout"] == plain["holdout"] - split["site"]
+    assert not plain["site"]
