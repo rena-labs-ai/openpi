@@ -77,7 +77,7 @@ class RenaInputs(transforms.DataTransformFn):
             inputs["actions"] = np.asarray(data["actions"], dtype=np.float32)
         if "task_stage" in data:
             inputs["task_stage"] = np.asarray(data["task_stage"], dtype=np.int32)
-        for key in ("prompt", "drop_state"):
+        for key in ("prompt", "drop_state", "annotation"):
             if key in data:
                 inputs[key] = data[key]
         return inputs
@@ -106,14 +106,43 @@ def make_rena_example() -> dict:
     }
 
 
+def annotation(rec: dict, frame: int, *, boxes: bool) -> str:
+    """A frame's annotation for knowledge insulation to train the backbone on, from its rena-autolabel labels: the skill
+    in the task grammar with argus's names; with boxes, the skill target's box on each camera that sees it from the
+    clean track, as autolabel_prompts writes box prompts; then the phase of argus's timeline the frame is in, where the
+    labels carry the timeline:
+
+        pick white plush lamb toy at Right: <loc..>x4 Wrist: <loc..>x4; lower and release: teal plush toy, into the bin
+    """
+    from autolabel_prompts import boxes_at
+    from autolabel_prompts import skill_at
+    from autolabel_prompts import skill_text
+    from autolabel_prompts import with_boxes
+
+    if (sk := skill_at(rec, frame)) is None:
+        return ""
+    text = skill_text(sk)
+    if boxes:
+        text = with_boxes(text, {c: b["box"] for c, b in boxes_at(sk, frame, "track").items() if b}, rec["image_sizes"])
+    t = frame / rec["fps"]
+    timeline = (rec.get("argus_labels") or {}).get("timeline") or []
+    if row := next((r for r in timeline if r["start_s"] <= t < r["end_s"]), None):
+        where = " ".join(x for x in (row.get("spatial_relation"), row.get("destination")) if x)
+        # argus tells like objects apart with a parenthetical ("(left)"), as join_argus drops it from commands
+        phase = re.sub(r"\s*\(.*?\)", "", f"{row['action']}: {row['object']}" + (f", {where}" if where else ""))
+        text += f"; {phase}"
+    return text
+
+
 @dataclasses.dataclass(frozen=True)
 class AutolabelPrompt(transforms.DataTransformFn):
     """Each training frame's prompt, sampled afresh every time the frame is drawn from rena-autolabel's labels
     (meta/autolabel.jsonl beside the dataset, autolabel_prompts.sample: the task, the skill, or the skill with the
     target's box per camera), and with probability state_dropout the state left out of the prompt (TokenizePrompt's
     drop_state). boxes_in "text" writes the boxes into the prompt as PaliGemma <loc> tokens, "image" passes them as
-    target_boxes for RenaInputs to draw, "none" never draws a box prompt: the skill prompt takes its share. It is a
-    repack transform, so it never runs at serving time.
+    target_boxes for RenaInputs to draw, "none" never draws a box prompt: the skill prompt takes its share. With
+    annotate, the frame's annotation for knowledge insulation's target, with the boxes only when the prompt gives none.
+    It is a repack transform, so it never runs at serving time.
 
     autolabel_prompts (rena-autolabel/packages/autolabel-prompts) and rena_task_grammar must be importable."""
 
@@ -122,6 +151,7 @@ class AutolabelPrompt(transforms.DataTransformFn):
     boxes_in: Literal["text", "image", "none"] = "text"
     # Fixes each frame's draw, for evaluations that must give every model the same prompts.
     seed: int | None = None
+    annotate: bool = False
 
     def __post_init__(self):
         lines = pathlib.Path(self.labels_path).read_text().splitlines()
@@ -134,18 +164,21 @@ class AutolabelPrompt(transforms.DataTransformFn):
         return Mix(skill=Mix.skill + Mix.boxes, boxes=0.0) if self.boxes_in == "none" else Mix()
 
     def __call__(self, data: dict) -> dict:
-        from autolabel_prompts import prompt
         from autolabel_prompts import sample
+        from autolabel_prompts import with_boxes
 
         data = dict(data)
         episode, frame = int(data.pop("episode_index")), int(data.pop("frame_index"))
         # fresh entropy by default: DataLoader workers share numpy's global seed
         rng = np.random.default_rng(None if self.seed is None else (self.seed, episode, frame))
         if (rec := self._records.get(episode)) is not None:
+            text, boxes = sample(rec, frame, rng, self.mix)
             if self.boxes_in == "text":
-                data["prompt"] = prompt(rec, frame, rng, self.mix)
+                data["prompt"] = with_boxes(text, boxes, rec["image_sizes"], self.mix.input_px)
             else:
-                data["prompt"], data["target_boxes"] = sample(rec, frame, rng, self.mix)
+                data["prompt"], data["target_boxes"] = text, boxes
+        if self.annotate:
+            data["annotation"] = "" if rec is None else annotation(rec, frame, boxes=not boxes)
         data["drop_state"] = bool(rng.random() < self.state_dropout)
         return data
 
