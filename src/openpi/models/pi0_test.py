@@ -9,6 +9,7 @@ import pytest
 
 from openpi.models import model as _model
 from openpi.models.pi0 import ki_masks
+from openpi.models.pi0 import make_attn_mask
 from openpi.models.pi0 import masked_mean_pool
 from openpi.models.pi0 import stage_ce_and_acc
 import openpi.models.pi0_config as _pi0_config
@@ -200,3 +201,33 @@ def test_ki_action_loss_mask_drops_the_flow_and_fast_tokens_of_a_sample(ki):
     assert jnp.allclose(masked_ce, want_ce)
     assert ce != masked_ce
 
+
+def _greedy_without_cache(model, obs, n):
+    """Greedy decoding that reruns the whole sequence for every token, as fast-eval-scripts/detect.py does."""
+    obs = _model.preprocess_observation(None, obs, train=False)
+    prefix_tokens, prefix_mask, prefix_ar_mask, n_img = model.embed_prefix(obs)
+    batch = jnp.arange(prefix_mask.shape[0])
+    last_prompt = n_img + jnp.sum(obs.tokenized_prompt_mask, axis=1) - 1
+    tokens = []
+    for _ in range(n):
+        emb, mask, ar = prefix_tokens, prefix_mask, prefix_ar_mask
+        if tokens:
+            decoded = jnp.stack(tokens, axis=1)
+            emb = jnp.concatenate([emb, model.PaliGemma.llm(decoded, method="embed")], axis=1)
+            mask = jnp.concatenate([mask, jnp.ones(decoded.shape, bool)], axis=1)
+            ar = jnp.concatenate([ar, jnp.ones(decoded.shape[1], bool)])
+        (out, _), _ = model.PaliGemma.llm([emb, None], mask=make_attn_mask(mask, ar), positions=jnp.cumsum(mask, 1) - 1)
+        last = out[:, -1] if tokens else out[batch, last_prompt]
+        tokens.append(jnp.argmax(model.PaliGemma.llm(last[:, None], method="deembed")[:, 0], axis=-1))
+    return jnp.stack(tokens, axis=1)
+
+
+def test_decode_annotation_matches_decoding_without_a_cache_and_stops_at_the_end_token(ki):
+    _, model, obs = ki
+    want = _greedy_without_cache(model, obs, 5)
+    assert jnp.array_equal(model.decode_annotation(obs, end_token=-1, max_tokens=5), want)
+    end = int(want[0, 2])
+    got = model.decode_annotation(obs, end_token=end, max_tokens=5)
+    assert got[0].tolist() == [*want[0, :3].tolist(), 0, 0]
+    stop = next((i for i, t in enumerate(want[1].tolist()) if t == end), 4)
+    assert got[1, : stop + 1].tolist() == want[1, : stop + 1].tolist()
