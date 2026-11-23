@@ -44,6 +44,24 @@ def make_attn_mask(input_mask, mask_ar):
     return jnp.logical_and(attn_mask, valid_mask)
 
 
+def ki_masks(prefix_mask, prefix_ar_mask, target_mask, suffix_mask, suffix_ar_mask):
+    """Knowledge insulation's attention: the backbone's pass over [images | prompt | targets], the prefix bidirectional
+    and the targets causal after it, and the action expert's pass, which sees the images and prompt as it does at
+    inference but none of the targets. Returns the backbone's input mask [b, p + t] and attention mask
+    [b, p + t, p + t], and the expert's attention mask [b, s, p + t + s]."""
+    input_mask = jnp.concatenate([prefix_mask, target_mask], axis=1)
+    ar_mask = jnp.concatenate([prefix_ar_mask, jnp.ones(target_mask.shape[1], dtype=jnp.bool_)])
+    visible = jnp.concatenate([prefix_mask, jnp.zeros_like(target_mask)], axis=1)
+    expert_mask = jnp.concatenate(
+        [
+            einops.repeat(visible, "b p -> b s p", s=suffix_mask.shape[1]),
+            make_attn_mask(suffix_mask, suffix_ar_mask),
+        ],
+        axis=-1,
+    )
+    return input_mask, make_attn_mask(input_mask, ar_mask), expert_mask
+
+
 @at.typecheck
 def posemb_sincos(
     pos: at.Real[at.Array, " b"], embedding_dim: int, min_period: float, max_period: float
@@ -89,6 +107,7 @@ class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        self.knowledge_insulation = config.knowledge_insulation
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -229,20 +248,26 @@ class Pi0(_model.BaseModel):
         )
         return prefix_out, prefix_mask, n_img_tokens, suffix_out
 
-    @override
-    @at.typecheck
-    def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
+    def _flow_inputs(self, rng, observation, actions, *, train):
+        """The preprocessed observation, the noised actions x_t, the velocity u_t they should give, and their time."""
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
-
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
+        return observation, x_t, u_t, time
+
+    @override
+    @at.typecheck
+    def compute_loss(
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+    ) -> at.Float[at.Array, "*b ah"]:
+        if self.knowledge_insulation:
+            return self.compute_ki_loss(rng, observation, actions, train=train)[0]
+        observation, x_t, u_t, time = self._flow_inputs(rng, observation, actions, train=train)
 
         # one big forward pass of prefix + suffix at once
         _prefix_out, _prefix_mask, _n_img_tokens, suffix_out = self._forward(observation, x_t, time)
@@ -260,19 +285,57 @@ class Pi0(_model.BaseModel):
 
     def compute_loss_and_stage(self, rng, observation, actions, *, train=False):
         """Like compute_loss, but also returns the stage head's raw logits."""
-        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
-        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
-        batch_shape = actions.shape[:-2]
-        noise = jax.random.normal(noise_rng, actions.shape)
-        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
-        time_expanded = time[..., None, None]
-        x_t = time_expanded * noise + (1 - time_expanded) * actions
-        u_t = noise - actions
+        observation, x_t, u_t, time = self._flow_inputs(rng, observation, actions, train=train)
         prefix_out, prefix_mask, n_img_tokens, suffix_out = self._forward(observation, x_t, time)
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
         stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
         return flow_loss, stage_logits
+
+    def compute_ki_loss(self, rng, observation, actions, *, train=False):
+        """Knowledge insulation's losses, from one backbone pass over [images | prompt | targets] and one action expert
+        pass that attends to the images' and prompt's keys and values through a stop_gradient (ki_masks).
+
+        Returns the flow loss [b, ah], zero for samples whose action_loss_mask is False; the mean cross-entropy of the
+        target tokens, without those samples' FAST tokens; and the stage head's logits."""
+        observation, x_t, u_t, time = self._flow_inputs(rng, observation, actions, train=train)
+        prefix_tokens, prefix_mask, prefix_ar_mask, n_img_tokens = self.embed_prefix(observation)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        input_mask, attn_mask, expert_mask = ki_masks(
+            prefix_mask, prefix_ar_mask, observation.target_mask, suffix_mask, suffix_ar_mask
+        )
+        targets = self.PaliGemma.llm(observation.target_tokens, method="embed")
+        (out, _), kv_cache = self.PaliGemma.llm(
+            [jnp.concatenate([prefix_tokens, targets], axis=1), None],
+            mask=attn_mask,
+            positions=jnp.cumsum(input_mask, axis=1) - 1,
+        )
+
+        # Each target token is predicted from the one before it, the first from the prompt's last token.
+        n_prefix = prefix_tokens.shape[1]
+        last_prompt = n_img_tokens + jnp.sum(observation.tokenized_prompt_mask, axis=1) - 1
+        before = jnp.concatenate([out[jnp.arange(out.shape[0]), last_prompt][:, None], out[:, n_prefix:-1]], axis=1)
+        logits = self.PaliGemma.llm(before, method="deembed")
+        picked = jnp.take_along_axis(logits, observation.target_tokens[..., None], axis=-1)[..., 0]
+        nll = jax.nn.logsumexp(logits, axis=-1) - picked
+        action_loss_mask = (
+            jnp.ones(out.shape[0], dtype=jnp.bool_)
+            if observation.action_loss_mask is None
+            else observation.action_loss_mask
+        )
+        ce_mask = observation.target_mask & (~observation.target_is_fast | action_loss_mask[:, None])
+        ce = jnp.sum(nll * ce_mask) / jnp.maximum(jnp.sum(ce_mask), 1)
+
+        (_, suffix_out), _ = self.PaliGemma.llm(
+            [None, suffix_tokens],
+            mask=expert_mask,
+            positions=jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1,
+            kv_cache=jax.lax.stop_gradient(kv_cache),
+            adarms_cond=[None, adarms_cond],
+        )
+        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+        flow = jnp.mean(jnp.square(v_t - u_t), axis=-1) * action_loss_mask[:, None]
+        return flow, ce, self._stage_logits_from_prefix(out[:, :n_prefix], prefix_mask, n_img_tokens)
 
     def _sample_actions_impl(
         self,
@@ -368,3 +431,4 @@ class Pi0(_model.BaseModel):
         x_0, prefix_out, prefix_mask, n_img_tokens = self._sample_actions_impl(rng, observation, num_steps, noise)
         stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
         return x_0, stage_logits
+

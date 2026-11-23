@@ -1,9 +1,14 @@
+import dataclasses
+import re
+
 import flax.nnx as nnx
 import jax
 import jax.numpy as jnp
 import numpy as np
+import pytest
 
 from openpi.models import model as _model
+from openpi.models.pi0 import ki_masks
 from openpi.models.pi0 import masked_mean_pool
 from openpi.models.pi0 import stage_ce_and_acc
 import openpi.models.pi0_config as _pi0_config
@@ -102,3 +107,96 @@ def test_pi0_all_lora():
     assert len(state) == 17
     assert all("lora" not in p for p in state)
     assert all("llm" in p for p in state)
+
+
+def test_compute_loss_and_stage_gives_flow_loss_and_stage_logits():
+    config = _pi0_config.Pi0Config(
+        pi05=True, paligemma_variant="dummy", action_expert_variant="dummy", num_stage_classes=7
+    )
+    model = config.create(jax.random.key(0))
+    obs, act = config.fake_obs(2), config.fake_act(2)
+    flow, logits = model.compute_loss_and_stage(jax.random.key(1), obs, act, train=True)
+    assert flow.shape == (2, config.action_horizon)
+    assert logits.shape == (2, 7)
+
+
+def test_ki_masks_keep_the_prompt_bidirectional_and_the_targets_from_the_expert():
+    # 2 image tokens, 2 prompt tokens and a pad; 2 target tokens and a pad; 2 action tokens.
+    prefix_mask = jnp.array([[True, True, True, True, False]])
+    target_mask = jnp.array([[True, True, False]])
+    input_mask, attn, expert = ki_masks(
+        prefix_mask, jnp.zeros(5, bool), target_mask, jnp.ones((1, 2), bool), jnp.array([True, False])
+    )
+    assert input_mask[0].tolist() == [True, True, True, True, False, True, True, False]
+    assert attn[0, :4, :4].all()  # images and prompt see each other both ways
+    assert not attn[0, :5, 5:].any()  # and never the targets
+    assert attn[0, 5].tolist() == [True, True, True, True, False, True, False, False]  # targets are causal
+    assert attn[0, 6].tolist() == [True, True, True, True, False, True, True, False]
+    assert expert[0, :, :4].all()
+    assert not expert[0, :, 4:8].any()  # the expert never sees a target
+    assert expert[0, :, 8:].all()
+
+
+@pytest.fixture(scope="module")
+def ki():
+    config = _pi0_config.Pi0Config(
+        pi05=True,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        knowledge_insulation=True,
+        max_target_len=6,
+        dtype="float32",
+    )
+    model = config.create(jax.random.key(0))
+    rng = np.random.default_rng(0)
+    obs = config.fake_obs(2)
+    prompt_mask = np.ones((2, config.max_token_len), bool)
+    prompt_mask[1, 5:] = False
+    obs = dataclasses.replace(
+        obs,
+        tokenized_prompt=jnp.asarray(rng.integers(0, 1000, (2, config.max_token_len)), jnp.int32),
+        tokenized_prompt_mask=jnp.asarray(prompt_mask),
+        target_tokens=jnp.asarray(rng.integers(0, 1000, (2, 6)), jnp.int32),
+        target_mask=jnp.array([[True] * 6, [True] * 4 + [False] * 2]),
+        target_is_fast=jnp.array([[False, False, True, True, True, True]] * 2),
+    )
+    return config, model, obs
+
+
+def test_ki_flow_loss_ignores_the_targets_and_trains_only_the_expert(ki):
+    config, model, obs = ki
+    act = jnp.asarray(np.random.default_rng(1).normal(size=(2, config.action_horizon, config.action_dim)), jnp.float32)
+    flow, ce, stage_logits = model.compute_ki_loss(jax.random.key(1), obs, act)
+    other = dataclasses.replace(obs, target_tokens=obs.target_tokens + 7)
+    other_flow, other_ce, _ = model.compute_ki_loss(jax.random.key(1), other, act)
+    assert flow.shape == (2, config.action_horizon)
+    assert stage_logits.shape == (2, config.num_stage_classes)
+    assert jnp.array_equal(flow, other_flow)
+    assert ce != other_ce
+
+    grads = nnx.grad(lambda m: jnp.mean(m.compute_ki_loss(jax.random.key(1), obs, act)[0]))(model)
+    flat = {"/".join(map(str, path)): np.abs(np.asarray(g.value)).max() for path, g in grads.flat_state().items()}
+    backbone = {p: g for p, g in flat.items() if p.startswith("PaliGemma") and not re.search(r"_1(/|$)", p)}
+    expert = {p: g for p, g in flat.items() if re.search(r"_1(/|$)", p)}
+    assert backbone
+    assert all(g == 0 for g in backbone.values())
+    assert any(g > 0 for g in expert.values())
+    assert flat["action_in_proj/kernel"] > 0
+
+
+def test_ki_action_loss_mask_drops_the_flow_and_fast_tokens_of_a_sample(ki):
+    config, model, obs = ki
+    act = jnp.ones((2, config.action_horizon, config.action_dim))
+    flow, ce, _ = model.compute_ki_loss(jax.random.key(1), obs, act)
+    masked = dataclasses.replace(obs, action_loss_mask=jnp.array([True, False]))
+    masked_flow, masked_ce, _ = model.compute_ki_loss(jax.random.key(1), masked, act)
+    assert jnp.array_equal(masked_flow[0], flow[0])
+    assert not masked_flow[1].any()
+    # without FAST tokens sample 1's cross-entropy is its two annotation tokens alone
+    no_fast = dataclasses.replace(
+        obs, target_is_fast=obs.target_is_fast.at[1].set(False), target_mask=obs.target_mask.at[1, 2:].set(False)
+    )
+    _, want_ce, _ = model.compute_ki_loss(jax.random.key(1), no_fast, act)
+    assert jnp.allclose(masked_ce, want_ce)
+    assert ce != masked_ce
+

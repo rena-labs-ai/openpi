@@ -117,6 +117,14 @@ class Observation(Generic[ArrayT]):
     # Per-frame integer stage label (renav2 task_stage). Optional; None for robots without it.
     task_stage: at.Int[ArrayT, "*b"] | None = None
 
+    # Knowledge insulation's targets for the backbone (tokenizer.KITargetTokenizer), trained on but never input at
+    # inference: the annotation and the FAST tokens, their mask, and which of them are FAST tokens.
+    target_tokens: at.Int[ArrayT, "*b t"] | None = None
+    target_mask: at.Bool[ArrayT, "*b t"] | None = None
+    target_is_fast: at.Bool[ArrayT, "*b t"] | None = None
+    # False for a sample whose actions train nothing (no flow loss, no FAST cross-entropy); None for all True.
+    action_loss_mask: at.Bool[ArrayT, "*b"] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
@@ -138,6 +146,10 @@ class Observation(Generic[ArrayT]):
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
             task_stage=data.get("task_stage"),
+            target_tokens=data.get("target_tokens"),
+            target_mask=data.get("target_mask"),
+            target_is_fast=data.get("target_is_fast"),
+            action_loss_mask=data.get("action_loss_mask"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -209,16 +221,7 @@ def preprocess_observation(
         else:
             out_masks[key] = jnp.asarray(observation.image_masks[key])
 
-    return Observation(
-        images=out_images,
-        image_masks=out_masks,
-        state=observation.state,
-        tokenized_prompt=observation.tokenized_prompt,
-        tokenized_prompt_mask=observation.tokenized_prompt_mask,
-        token_ar_mask=observation.token_ar_mask,
-        token_loss_mask=observation.token_loss_mask,
-        task_stage=observation.task_stage,
-    )
+    return dataclasses.replace(observation, images=out_images, image_masks=out_masks)
 
 
 @dataclasses.dataclass(frozen=True)
