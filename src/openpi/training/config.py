@@ -143,6 +143,11 @@ class ModelTransformFactory(GroupFactory):
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                             discrete_state_input=model_config.discrete_state_input,
                         ),
+                        *(
+                            [_transforms.TokenizeKITargets(_tokenizer.KITargetTokenizer(model_config.max_target_len))]
+                            if model_config.knowledge_insulation
+                            else []
+                        ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
