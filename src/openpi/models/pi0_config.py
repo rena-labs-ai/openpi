@@ -33,6 +33,12 @@ class Pi0Config(_model.BaseModelConfig):
     discrete_state_input: bool = None  # type: ignore
     # Classes of the stage head (pi0.Pi0.stage_head_out); rena's are rena_task_grammar.STAGES.
     num_stage_classes: int = 3
+    # Knowledge insulation (pi05 only): the backbone also trains on cross-entropy over target tokens after the prompt
+    # (an annotation, then the action chunk's FAST tokens), and the action expert sees the images and prompt through a
+    # stop_gradient, so the flow loss leaves the backbone alone (Pi0.compute_ki_loss).
+    knowledge_insulation: bool = False
+    # Length the target tokens are padded to (tokenizer.KITargetTokenizer).
+    max_target_len: int = 128
 
     def __post_init__(self):
         if self.max_token_len is None:
@@ -81,6 +87,13 @@ class Pi0Config(_model.BaseModelConfig):
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )
+            if self.knowledge_insulation:
+                observation_spec = dataclasses.replace(
+                    observation_spec,
+                    target_tokens=jax.ShapeDtypeStruct([batch_size, self.max_target_len], jnp.int32),
+                    target_mask=jax.ShapeDtypeStruct([batch_size, self.max_target_len], bool),
+                    target_is_fast=jax.ShapeDtypeStruct([batch_size, self.max_target_len], bool),
+                )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 
         return observation_spec, action_spec

@@ -151,7 +151,7 @@ class Embedder(nn.Module):
         return x
 
     def decode(self, x):
-        return jnp.dot(x, self.input_embedding_table.T)
+        return jnp.dot(x, self.input_embedding_table.T, preferred_element_type=jnp.float32)
 
 
 @at.typecheck
@@ -384,6 +384,11 @@ class Module(nn.Module):
     @at.typecheck
     def embed(self, tokens: at.Int[at.Array, "b t"]) -> at.Float[at.Array, "b t d"]:
         return self.embedder.encode(tokens).astype(self.embed_dtype)
+
+    @at.typecheck
+    def deembed(self, x: at.Float[at.Array, "b t d"]) -> at.Float[at.Array, "b t v"]:
+        """Logits over the vocabulary, in float32, through the embedding the output head is tied to."""
+        return self.embedder.decode(x)
 
     @at.typecheck
     def __call__(

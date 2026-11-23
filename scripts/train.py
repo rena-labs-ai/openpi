@@ -150,14 +150,24 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        if not config.stage_loss_weight:
+        if getattr(config.model, "knowledge_insulation", False):
+            # A sample without action loss adds zero flow, so the flow's weight scales with the share of those with.
+            chunked_loss, target_ce, stage_logits = model.compute_ki_loss(rng, observation, actions, train=True)
+            flow = jnp.mean(chunked_loss)
+            loss, aux = target_ce + config.ki_flow_loss_weight * flow, {"target_ce": target_ce}
+        elif config.stage_loss_weight:
+            chunked_loss, stage_logits = model.compute_loss_and_stage(rng, observation, actions, train=True)
+            loss = flow = jnp.mean(chunked_loss)
+            aux = {}
+        else:
             chunked_loss = model.compute_loss(rng, observation, actions, train=True)
             return jnp.mean(chunked_loss), flow_by_step(chunked_loss)
-        chunked_loss, stage_logits = model.compute_loss_and_stage(rng, observation, actions, train=True)
-        flow = jnp.mean(chunked_loss)
-        ce, acc = _pi0.stage_ce_and_acc(stage_logits, observation.task_stage)
-        aux = {"flow_loss": flow, "stage_loss": ce, "stage_acc": acc, **flow_by_step(chunked_loss)}
-        return flow + config.stage_loss_weight * ce, aux
+        aux |= {"flow_loss": flow, **flow_by_step(chunked_loss)}
+        if config.stage_loss_weight:
+            ce, acc = _pi0.stage_ce_and_acc(stage_logits, observation.task_stage)
+            aux |= {"stage_loss": ce, "stage_acc": acc}
+            loss += config.stage_loss_weight * ce
+        return loss, aux
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
