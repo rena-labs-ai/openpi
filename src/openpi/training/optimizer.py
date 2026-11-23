@@ -1,6 +1,8 @@
 import dataclasses
+import re
 from typing import Protocol, runtime_checkable
 
+import jax
 import jax.numpy as jnp
 import optax
 
@@ -62,6 +64,31 @@ class OptimizerConfig(Protocol):
     ) -> optax.GradientTransformation: ...
 
 
+# pi0's action expert: its own Gemma weights (named with a _1 suffix beside the backbone's) and the layers around it.
+_EXPERT = re.compile(r"PaliGemma/llm/.*_1(/|$)|^(action_in_proj|action_out_proj|time_mlp_in|time_mlp_out|state_proj|"
+                     r"action_time_mlp_in|action_time_mlp_out)/")
+
+
+def module_labels(params: at.PyTree) -> at.PyTree:
+    """Each parameter's module: "expert" for the action expert, "backbone" for the rest (the VLM and stage head)."""
+
+    def label(path, _):
+        name = "/".join(str(getattr(k, "key", getattr(k, "name", k))) for k in path)
+        return "expert" if _EXPERT.search(name) else "backbone"
+
+    return jax.tree_util.tree_map_with_path(label, params)
+
+
+def module_norms(grads: at.PyTree) -> dict[str, jax.Array]:
+    """The global norm of each module's gradients."""
+    labels = jax.tree.leaves(module_labels(grads))
+    leaves = jax.tree.leaves(grads)
+    return {
+        f"grad_norm_{m}": optax.global_norm([g for g, l in zip(leaves, labels, strict=True) if l == m])
+        for m in ("backbone", "expert")
+    }
+
+
 @dataclasses.dataclass(frozen=True)
 class AdamW(OptimizerConfig):
     """AdamW optimizer."""
@@ -72,17 +99,30 @@ class AdamW(OptimizerConfig):
     # Changing this to 0 can cause out-of-memory errors for some reason, so we set it to a negligible value.
     weight_decay: float = 1e-10
     clip_gradient_norm: float = 1.0
+    # Set, the backbone and the action expert are clipped each on its own norm, and the expert's learning rate is the
+    # schedule's times this. With knowledge insulation the two learn from different losses, so one clip on the sum
+    # would scale the expert's steps by the backbone's gradient.
+    expert_lr_scale: float | None = None
 
     def create(
         self,
         lr: optax.ScalarOrSchedule,
         weight_decay_mask: at.PyTree | None = None,
     ) -> optax.GradientTransformation:
-        tx = optax.adamw(
-            lr, b1=self.b1, b2=self.b2, eps=self.eps, weight_decay=self.weight_decay, mask=weight_decay_mask
-        )
+        def clipped_adamw(lr):
+            tx = optax.adamw(
+                lr, b1=self.b1, b2=self.b2, eps=self.eps, weight_decay=self.weight_decay, mask=weight_decay_mask
+            )
+            return optax.chain(optax.clip_by_global_norm(self.clip_gradient_norm), tx)
 
-        return optax.chain(optax.clip_by_global_norm(self.clip_gradient_norm), tx)
+        if self.expert_lr_scale is None:
+            return clipped_adamw(lr)
+        assert weight_decay_mask is None, "Weight decay masks are not split by module"
+        scale = self.expert_lr_scale
+        expert_lr = (lambda step: scale * lr(step)) if callable(lr) else scale * lr
+        return optax.multi_transform(
+            {"backbone": clipped_adamw(lr), "expert": clipped_adamw(expert_lr)}, module_labels
+        )
 
 
 @dataclasses.dataclass(frozen=True)

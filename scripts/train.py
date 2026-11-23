@@ -207,6 +207,7 @@ def train_step(
     info = {
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
+        **_optimizer.module_norms(grads),
         "param_norm": optax.global_norm(kernel_params),
         **aux,
     }

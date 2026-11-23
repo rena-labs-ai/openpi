@@ -13,6 +13,7 @@ from openpi.models.pi0 import make_attn_mask
 from openpi.models.pi0 import masked_mean_pool
 from openpi.models.pi0 import stage_ce_and_acc
 import openpi.models.pi0_config as _pi0_config
+import openpi.training.optimizer as _optimizer
 
 
 def test_masked_mean_pool_ignores_masked():
@@ -183,6 +184,28 @@ def test_ki_flow_loss_ignores_the_targets_and_trains_only_the_expert(ki):
     assert all(g == 0 for g in backbone.values())
     assert any(g > 0 for g in expert.values())
     assert flat["action_in_proj/kernel"] > 0
+
+
+def test_ki_optimizer_splits_modules_by_the_loss_that_trains_them(ki):
+    config, model, obs = ki
+    act = jnp.asarray(np.random.default_rng(1).normal(size=(2, config.action_horizon, config.action_dim)), jnp.float32)
+    flow_grads = nnx.grad(lambda m: jnp.mean(m.compute_ki_loss(jax.random.key(1), obs, act)[0]))(model)
+    ce_grads = nnx.grad(lambda m: m.compute_ki_loss(jax.random.key(1), obs, act)[1])(model)
+    labels = _optimizer.module_labels(nnx.state(model, nnx.Param))
+    for grads, module in ((flow_grads, "expert"), (ce_grads, "backbone")):
+        trained = jax.tree.map(lambda g: bool(jnp.any(g != 0)), grads)
+        for t, label in zip(jax.tree.leaves(trained), jax.tree.leaves(labels), strict=True):
+            assert label == module or not t
+
+    # A backbone gradient a thousand times larger leaves the expert's step as it was.
+    params = nnx.state(model, nnx.Param)
+    tx = _optimizer.AdamW(expert_lr_scale=0.5).create(1e-3)
+    both = jax.tree.map(lambda f, c: f + 1e3 * c, flow_grads, ce_grads)
+    expert_only, _ = tx.update(flow_grads, tx.init(params), params)
+    mixed, _ = tx.update(both, tx.init(params), params)
+    for a, b, label in zip(jax.tree.leaves(expert_only), jax.tree.leaves(mixed), jax.tree.leaves(labels), strict=True):
+        if label == "expert":
+            np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-12)
 
 
 def test_ki_action_loss_mask_drops_the_flow_and_fast_tokens_of_a_sample(ki):
