@@ -377,8 +377,10 @@ class LeRobotRenaDataConfig(DataConfigFactory):
     state_dropout: float = 0.0
     # Where the target boxes reach the policy: as <loc> tokens in the prompt, drawn on the camera images, or nowhere.
     boxes_in: Literal["text", "image", "none"] = "text"
-    # The episodes to use: all, or rena_split's train or holdout part.
-    split: Literal["all", "train", "holdout"] = "all"
+    # The episodes to use: all, or rena_split's train, holdout or site part.
+    split: Literal["all", "train", "holdout", "site"] = "all"
+    # Deployments (autolabel.jsonl's dataset) held out whole, as the site split: an office the model never trains in.
+    site_holdout: tuple[str, ...] = ()
     # What each chunk's joint actions are relative to: the measured joints at its first frame, or the joint targets
     # commanded the step before (rena_policy.AnchorOnCommand), which carry no tracking lag or sag.
     anchor: Literal["state", "command"] = "state"
@@ -393,9 +395,9 @@ class LeRobotRenaDataConfig(DataConfigFactory):
         from lerobot.common.constants import HF_LEROBOT_HOME
 
         labels = HF_LEROBOT_HOME / self.repo_id / "meta/autolabel.jsonl"
-        split = rena_split(labels)
+        split = rena_split(labels, self.site_holdout)
         episodes = None if self.split == "all" else split[self.split]
-        if self.drop_stepped and self.split != "holdout":
+        if self.drop_stepped and self.split == "train":
             kept = split["train"] | split["holdout"] if episodes is None else episodes
             episodes = kept - rena_stepped.stepped_episodes(HF_LEROBOT_HOME / self.repo_id)
         command = self.anchor == "command"
@@ -448,13 +450,22 @@ class LeRobotRenaDataConfig(DataConfigFactory):
         )
 
 
-def rena_split(labels_path: pathlib.Path | str) -> dict[str, set[int]]:
-    """rena-autolabel's episodes split by recording: about one in twenty held out, chosen by a hash of the recording's
-    source key, so a recording stays on its side when the dataset is rewritten with others."""
-    split = {"train": set(), "holdout": set()}
+# The Toronto office's robots, rena_06 and rena_08 (rena-dev/robots.yaml).
+TORONTO = ("deployment/01KSMZ6GX7YB9T9TBA54R7GD2C", "deployment/01KW2PT72APBHHTCN8KT3FWR8T")
+
+
+def rena_split(labels_path: pathlib.Path | str, site: Sequence[str] = ()) -> dict[str, set[int]]:
+    """rena-autolabel's episodes split by recording: the site's deployments whole, then about one in twenty of the rest
+    held out, chosen by a hash of the recording's source key, so a recording stays on its side when the dataset is
+    rewritten with others."""
+    split = {"train": set(), "holdout": set(), "site": set()}
     for line in pathlib.Path(labels_path).read_text().splitlines():
         rec = json.loads(line)
-        split["holdout" if zlib.crc32(rec["source_key"].encode()) % 20 == 0 else "train"].add(rec["episode_index"])
+        if rec["dataset"] in site:
+            part = "site"
+        else:
+            part = "holdout" if zlib.crc32(rec["source_key"].encode()) % 20 == 0 else "train"
+        split[part].add(rec["episode_index"])
     return split
 
 
@@ -676,6 +687,7 @@ def _rena(
     action_norm: Literal["global", "per_timestep"] = "global",
     repo_id: str = "rena/rena_autolabel_v3",
     drop_stepped: bool = False,
+    site_holdout: tuple[str, ...] = (),
 ) -> TrainConfig:
     """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
     stage head as rena-training trains it. With state, the state is in the prompt, left out of a fifth of training
@@ -694,6 +706,7 @@ def _rena(
             anchor=anchor,
             action_norm=action_norm,
             drop_stepped=drop_stepped,
+            site_holdout=site_holdout,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         stage_loss_weight=0.03,
@@ -940,6 +953,8 @@ _CONFIGS = [
         for name, kw in (
             ("pi05_rena_ho_boximg_nostepped", {"drop_stepped": True}),
             ("pi05_rena_ho_boximg_interp", {"repo_id": "rena/rena_autolabel_v3_interp"}),
+            # without the Toronto office, scored on it apart
+            ("pi05_rena_tor_interp", {"repo_id": "rena/rena_autolabel_v3_interp", "site_holdout": TORONTO}),
         )
     ),
     #

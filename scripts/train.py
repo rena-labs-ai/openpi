@@ -223,7 +223,7 @@ def holdout_step(state: training_utils.TrainState, batch: dict, rng: at.KeyArray
 
 
 def holdout_scores(
-    holdout: _holdout.Holdout, pholdout_step, state: training_utils.TrainState, data_sharding, mesh
+    holdout: _holdout.Holdout, pholdout_step, state: training_utils.TrainState, data_sharding, mesh, prefix: str
 ) -> dict[str, float]:
     """The holdout's flow loss and sampled-action errors, with the same noise and flow times every time."""
     rngs = jax.random.split(jax.random.key(0), len(holdout.batches))
@@ -236,16 +236,16 @@ def holdout_scores(
     flow = np.concatenate(flows)
     report = holdout.report(holdout.errors(predicted))
     scores = {
-        "holdout/flow_loss": float(flow.mean()),
-        "holdout/flow_loss_executed": float(flow[:, : _holdout.EXECUTED].mean()),
-        "holdout/flow_loss_rest": float(flow[:, _holdout.EXECUTED :].mean()),
+        f"{prefix}/flow_loss": float(flow.mean()),
+        f"{prefix}/flow_loss_executed": float(flow[:, : _holdout.EXECUTED].mean()),
+        f"{prefix}/flow_loss_rest": float(flow[:, _holdout.EXECUTED :].mean()),
     }
     for group, summary in {"all": report["all"], **report["by_prompt"]}.items():
         suffix = "" if group == "all" else f"_{group}"
-        scores[f"holdout/joint_mae_executed{suffix}"] = summary["joint_mae_executed"]
-    scores["holdout/joint_mae_chunk"] = report["all"]["joint_mae_chunk"]
-    scores["holdout/joint_mae_first_step"] = report["all"]["joint_mae_by_step"][0]
-    scores["holdout/gripper_mae_executed"] = report["all"]["gripper_mae_executed"]
+        scores[f"{prefix}/joint_mae_executed{suffix}"] = summary["joint_mae_executed"]
+    scores[f"{prefix}/joint_mae_chunk"] = report["all"]["joint_mae_chunk"]
+    scores[f"{prefix}/joint_mae_first_step"] = report["all"]["joint_mae_by_step"][0]
+    scores[f"{prefix}/gripper_mae_executed"] = report["all"]["gripper_mae_executed"]
     return scores
 
 
@@ -315,15 +315,19 @@ def main(config: _config.TrainConfig):
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
-    holdout = None
+    holdouts = {}
     if config.holdout_interval:
-        holdout = _holdout.load(
-            config,
-            data_loader.data_config().norm_stats,
-            batch_size=config.batch_size,
-            max_frames=config.holdout_frames,
-        )
-        logging.info(f"Holdout: {len(holdout.want)} frames, scored every {config.holdout_interval} steps")
+        # the site (an office held out whole) is scored apart from the recordings held out at random
+        splits = ("holdout", "site") if getattr(config.data, "site_holdout", ()) else ("holdout",)
+        for split in splits:
+            holdouts[split] = _holdout.load(
+                config,
+                data_loader.data_config().norm_stats,
+                batch_size=config.batch_size,
+                max_frames=config.holdout_frames,
+                split=split,
+            )
+            logging.info(f"{split}: {len(holdouts[split].want)} frames, scored every {config.holdout_interval} steps")
         pholdout_step = jax.jit(holdout_step)
     lr_schedule = config.lr_schedule.create()
 
@@ -356,9 +360,11 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
-        if holdout is not None and (step % config.holdout_interval == 0 or step == config.num_train_steps - 1):
+        if holdouts and (step % config.holdout_interval == 0 or step == config.num_train_steps - 1):
             scoring_start = time.monotonic()
-            scores = holdout_scores(holdout, pholdout_step, train_state, data_sharding, mesh)
+            scores = {}
+            for split, holdout in holdouts.items():
+                scores |= holdout_scores(holdout, pholdout_step, train_state, data_sharding, mesh, split)
             pbar.write(f"Step {step}: " + ", ".join(f"{k}={v:.4f}" for k, v in scores.items()))
             wandb.log(scores, step=step)
             interval_start += time.monotonic() - scoring_start  # not training time
