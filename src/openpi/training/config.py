@@ -411,6 +411,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             kept = split["train"] | split["holdout"] if episodes is None else episodes
             episodes = kept - rena_stepped.stepped_episodes(self.dataset_dir)
         command = self.anchor == "command"
+        ki = getattr(model_config, "knowledge_insulation", False)
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -431,24 +432,31 @@ class LeRobotRenaDataConfig(DataConfigFactory):
                     str(labels),
                     state_dropout=self.state_dropout,
                     boxes_in=self.boxes_in,
+                    annotate=ki,
                 ),
                 *([rena_policy.SplitPrevAction()] if command else []),
             ]
-        )
-        delta_action_mask = _transforms.make_bool_mask(6, -1)
-        data_transforms = _transforms.Group(
-            inputs=[
-                *([rena_policy.AnchorOnCommand()] if command else []),
-                rena_policy.RenaInputs(),
-                _transforms.DeltaActions(delta_action_mask),
-            ],
-            outputs=[_transforms.AbsoluteActions(delta_action_mask), rena_policy.RenaOutputs()],
         )
         base = self.create_base_config(assets_dirs, model_config)
         if base.norm_stats is not None and (base.norm_stats["actions"].q01.ndim == 2) != (
             self.action_norm == "per_timestep"
         ):
             raise ValueError(f"{base.asset_id}'s action norm stats are not {self.action_norm}")
+        # The FAST target's stats are over every step of a chunk (compute_rena_norm_stats.py writes them as
+        # fast_actions); taken out of the norm stats, so serving's Unnormalize never looks for them.
+        fast_stats = None if base.norm_stats is None else base.norm_stats.pop("fast_actions", None)
+        if ki and base.norm_stats is not None and fast_stats is None:
+            raise ValueError(f"{base.asset_id}'s norm stats have no fast_actions: rerun compute_rena_norm_stats.py")
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = _transforms.Group(
+            inputs=[
+                *([rena_policy.AnchorOnCommand()] if command else []),
+                rena_policy.RenaInputs(),
+                _transforms.DeltaActions(delta_action_mask),
+                *([_transforms.FASTActions(fast_stats)] if fast_stats is not None else []),
+            ],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask), rena_policy.RenaOutputs()],
+        )
         return dataclasses.replace(
             base,
             repack_transforms=repack_transform,
@@ -615,6 +623,9 @@ class TrainConfig:
     # Weight of the stage head's cross-entropy (pi0.Pi0.compute_loss_and_stage) added to the flow loss; 0 trains
     # without it, and with it every batch needs observation task_stage.
     stage_loss_weight: float = 0.0
+    # Weight of the flow loss against the target tokens' cross-entropy for a model with knowledge insulation
+    # (pi0.Pi0.compute_ki_loss); pi0.5's alpha.
+    ki_flow_loss_weight: float = 10.0
 
     # Specifies which weights should be frozen.
     freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
@@ -697,6 +708,7 @@ def _rena(
     action_norm: Literal["global", "per_timestep"] = "global",
     repo_id: str = "rena/rena_autolabel_v3",
     drop_stepped: bool = False,
+    knowledge_insulation: bool = False,
     site_holdout: tuple[str, ...] = (),
 ) -> TrainConfig:
     """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
@@ -705,8 +717,12 @@ def _rena(
     return TrainConfig(
         name=name,
         model=pi0_config.Pi0Config(
-            pi05=True, action_horizon=50, num_stage_classes=7, discrete_state_input=state
-        ),  # len(rena_task_grammar.STAGES)
+            pi05=True,
+            action_horizon=50,
+            num_stage_classes=7,  # len(rena_task_grammar.STAGES)
+            discrete_state_input=state,
+            knowledge_insulation=knowledge_insulation,
+        ),
         data=LeRobotRenaDataConfig(
             repo_id=repo_id,
             base_config=DataConfig(prompt_from_task=True),
@@ -718,7 +734,9 @@ def _rena(
             drop_stepped=drop_stepped,
             site_holdout=site_holdout,
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params", paligemma_locs=knowledge_insulation
+        ),
         stage_loss_weight=0.03,
         holdout_interval=1000 if split == "train" else 0,
         fsdp_devices=4,
@@ -963,6 +981,11 @@ _CONFIGS = [
         for name, kw in (
             ("pi05_rena_ho_boximg_nostepped", {"drop_stepped": True}),
             ("pi05_rena_ho_boximg_interp", {"repo_id": "rena/rena_autolabel_v3_interp"}),
+            # with knowledge insulation: the backbone learns the frame's annotation and the chunk's FAST tokens
+            (
+                "pi05_rena_ho_ki",
+                {"repo_id": "rena/rena_autolabel_v3_interp", "knowledge_insulation": True},
+            ),
             # v4 (v3 merged with the next labelled batch by merge_rena_datasets.py) without the Toronto office, scored
             # on it apart
             ("pi05_rena_tor_interp", {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO}),

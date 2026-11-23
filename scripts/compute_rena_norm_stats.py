@@ -63,6 +63,9 @@ def main(config_name: str, out_dir: pathlib.Path | None = None) -> None:
         "state": stats(state, 0),
         "actions": stats(action, 0) if per_step else stats(action.reshape(-1, action.shape[-1]), 0),
     }
+    if getattr(config.model, "knowledge_insulation", False):
+        # the FAST target's, over every step of a chunk whatever action_norm is (transforms.FASTActions)
+        norm["fast_actions"] = stats(action.reshape(-1, action.shape[-1]), 0)
     out = out_dir or config.assets_dirs / data_config.asset_id
     normalize.save(out, norm)
     print(f"{len(states)} episodes, {len(state)} frames, actions {action.shape[1:]} ({factory.action_norm}) -> {out}")
