@@ -49,6 +49,7 @@ def test_outputs_give_the_stage_as_rena_serving_does():
     assert out["task_stage"] == 1
     np.testing.assert_allclose(out["stage_probs"], [0.1, 0.7, 0.2], rtol=1e-6)
 
+
 def _labels():
     track = {
         "image_0": {"frames": [0, 50], "labels": [{"box": [0.25, 0.25, 0.5, 0.5]}, None]},

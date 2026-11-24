@@ -65,8 +65,10 @@ class OptimizerConfig(Protocol):
 
 
 # pi0's action expert: its own Gemma weights (named with a _1 suffix beside the backbone's) and the layers around it.
-_EXPERT = re.compile(r"PaliGemma/llm/.*_1(/|$)|^(action_in_proj|action_out_proj|time_mlp_in|time_mlp_out|state_proj|"
-                     r"action_time_mlp_in|action_time_mlp_out)/")
+_EXPERT = re.compile(
+    r"PaliGemma/llm/.*_1(/|$)|^(action_in_proj|action_out_proj|time_mlp_in|time_mlp_out|state_proj|"
+    r"action_time_mlp_in|action_time_mlp_out)/"
+)
 
 
 def module_labels(params: at.PyTree) -> at.PyTree:
@@ -84,7 +86,7 @@ def module_norms(grads: at.PyTree) -> dict[str, jax.Array]:
     labels = jax.tree.leaves(module_labels(grads))
     leaves = jax.tree.leaves(grads)
     return {
-        f"grad_norm_{m}": optax.global_norm([g for g, l in zip(leaves, labels, strict=True) if l == m])
+        f"grad_norm_{m}": optax.global_norm([g for g, label in zip(leaves, labels, strict=True) if label == m])
         for m in ("backbone", "expert")
     }
 
@@ -120,9 +122,7 @@ class AdamW(OptimizerConfig):
         assert weight_decay_mask is None, "Weight decay masks are not split by module"
         scale = self.expert_lr_scale
         expert_lr = (lambda step: scale * lr(step)) if callable(lr) else scale * lr
-        return optax.multi_transform(
-            {"backbone": clipped_adamw(lr), "expert": clipped_adamw(expert_lr)}, module_labels
-        )
+        return optax.multi_transform({"backbone": clipped_adamw(lr), "expert": clipped_adamw(expert_lr)}, module_labels)
 
 
 @dataclasses.dataclass(frozen=True)
