@@ -17,9 +17,9 @@ def _git(*args: str) -> str:
 def test_the_committed_copy_is_the_pinned_tree(dep):
     """A tree id hashes content alone, so a committed edit to the copy fails here."""
     pin = json.loads(_git("show", f"HEAD:deps/{dep}.pin.json"))
-    assert _git("rev-parse", f"HEAD:third_party/{dep}") == pin["tree"], (
-        f"third_party/{dep} differs from its pin: change it in {pin['repo']}, then run scripts/bump_rena_dep.sh"
-    )
+    assert (
+        _git("rev-parse", f"HEAD:third_party/{dep}") == pin["tree"]
+    ), f"third_party/{dep} differs from its pin: change it in {pin['repo']}, then run scripts/bump_rena_dep.sh"
 
 
 def test_training_imports_the_vendored_copies():
