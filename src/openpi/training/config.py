@@ -970,11 +970,12 @@ _CONFIGS = [
                 "pi05_rena_ho_ki",
                 {"repo_id": "rena/rena_autolabel_v3_interp", "knowledge_insulation": True},
             ),
-            # without the Toronto office, scored on it apart: flow only, then with knowledge insulation
-            ("pi05_rena_tor_interp", {"repo_id": "rena/rena_autolabel_v3_interp", "site_holdout": TORONTO}),
+            # v4 (v3 and the unlabelled_dep batch, merge_rena_datasets.py) without the Toronto office, scored on it apart:
+            # flow only, then with knowledge insulation
+            ("pi05_rena_tor_interp", {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO}),
             (
                 "pi05_rena_tor_ki",
-                {"repo_id": "rena/rena_autolabel_v3_interp", "site_holdout": TORONTO, "knowledge_insulation": True},
+                {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO, "knowledge_insulation": True},
             ),
         )
     ),
