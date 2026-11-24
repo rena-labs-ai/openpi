@@ -623,9 +623,6 @@ class TrainConfig:
     # Weight of the stage head's cross-entropy (pi0.Pi0.compute_loss_and_stage) added to the flow loss; 0 trains
     # without it, and with it every batch needs observation task_stage.
     stage_loss_weight: float = 0.0
-    # Weight of the flow loss against the target tokens' cross-entropy for a model with knowledge insulation
-    # (pi0.Pi0.compute_ki_loss); pi0.5's alpha.
-    ki_flow_loss_weight: float = 10.0
 
     # Specifies which weights should be frozen.
     freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
@@ -737,8 +734,8 @@ def _rena(
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params", paligemma_locs=knowledge_insulation
         ),
-        # Knowledge insulation clips and steps the backbone and the expert apart (optimizer.AdamW.expert_lr_scale).
-        optimizer=_optimizer.AdamW(expert_lr_scale=1.0 if knowledge_insulation else None),
+        # Knowledge insulation clips the backbone and the expert apart (optimizer.AdamW.clip_per_module).
+        optimizer=_optimizer.AdamW(clip_per_module=knowledge_insulation),
         stage_loss_weight=0.03,
         holdout_interval=1000 if split == "train" else 0,
         fsdp_devices=4,

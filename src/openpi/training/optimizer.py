@@ -101,28 +101,23 @@ class AdamW(OptimizerConfig):
     # Changing this to 0 can cause out-of-memory errors for some reason, so we set it to a negligible value.
     weight_decay: float = 1e-10
     clip_gradient_norm: float = 1.0
-    # Set, the backbone and the action expert are clipped each on its own norm, and the expert's learning rate is the
-    # schedule's times this. With knowledge insulation the two learn from different losses, so one clip on the sum
-    # would scale the expert's steps by the backbone's gradient.
-    expert_lr_scale: float | None = None
+    # Clip the backbone and the action expert each on its own gradient norm (module_labels). With knowledge insulation
+    # the two learn from different losses, so one clip on the sum would scale the expert's steps by the backbone's
+    # gradient.
+    clip_per_module: bool = False
 
     def create(
         self,
         lr: optax.ScalarOrSchedule,
         weight_decay_mask: at.PyTree | None = None,
     ) -> optax.GradientTransformation:
-        def clipped_adamw(lr):
-            tx = optax.adamw(
-                lr, b1=self.b1, b2=self.b2, eps=self.eps, weight_decay=self.weight_decay, mask=weight_decay_mask
-            )
-            return optax.chain(optax.clip_by_global_norm(self.clip_gradient_norm), tx)
-
-        if self.expert_lr_scale is None:
-            return clipped_adamw(lr)
-        assert weight_decay_mask is None, "Weight decay masks are not split by module"
-        scale = self.expert_lr_scale
-        expert_lr = (lambda step: scale * lr(step)) if callable(lr) else scale * lr
-        return optax.multi_transform({"backbone": clipped_adamw(lr), "expert": clipped_adamw(expert_lr)}, module_labels)
+        tx = optax.adamw(
+            lr, b1=self.b1, b2=self.b2, eps=self.eps, weight_decay=self.weight_decay, mask=weight_decay_mask
+        )
+        clip = optax.clip_by_global_norm(self.clip_gradient_norm)
+        if self.clip_per_module:
+            clip = optax.multi_transform({"backbone": clip, "expert": clip}, module_labels)
+        return optax.chain(clip, tx)
 
 
 @dataclasses.dataclass(frozen=True)

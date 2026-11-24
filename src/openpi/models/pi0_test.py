@@ -193,7 +193,7 @@ def test_ki_optimizer_splits_modules_by_the_loss_that_trains_them(ki):
 
     # A backbone gradient a thousand times larger leaves the expert's step as it was.
     params = nnx.state(model, nnx.Param)
-    tx = _optimizer.AdamW(expert_lr_scale=0.5).create(1e-3)
+    tx = _optimizer.AdamW(clip_per_module=True).create(1e-3)
     both = jax.tree.map(lambda f, c: f + 1e3 * c, flow_grads, ce_grads)
     expert_only, _ = tx.update(flow_grads, tx.init(params), params)
     mixed, _ = tx.update(both, tx.init(params), params)

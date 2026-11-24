@@ -19,6 +19,7 @@ import wandb
 
 import openpi.models.model as _model
 import openpi.models.pi0 as _pi0
+import openpi.models.pi0_config as _pi0_config
 import openpi.shared.array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
@@ -150,11 +151,11 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        if getattr(config.model, "knowledge_insulation", False):
-            # A sample without action loss adds zero flow, so the flow's weight scales with the share of those with.
+        if isinstance(config.model, _pi0_config.Pi0Config) and config.model.knowledge_insulation:
+            # The two losses train disjoint parameters (compute_ki_loss), so their sum weighs neither against the other.
             chunked_loss, target_ce, stage_logits = model.compute_ki_loss(rng, observation, actions, train=True)
             flow = jnp.mean(chunked_loss)
-            loss, aux = target_ce + config.ki_flow_loss_weight * flow, {"target_ce": target_ce}
+            loss, aux = target_ce + flow, {"target_ce": target_ce}
         elif config.stage_loss_weight:
             chunked_loss, stage_logits = model.compute_loss_and_stage(rng, observation, actions, train=True)
             loss = flow = jnp.mean(chunked_loss)
@@ -207,7 +208,7 @@ def train_step(
     info = {
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
-        **_optimizer.module_norms(grads),
+        **(_optimizer.module_norms(grads) if getattr(config.optimizer, "clip_per_module", False) else {}),
         "param_norm": optax.global_norm(kernel_params),
         **aux,
     }
