@@ -41,6 +41,8 @@ class Pi0Config(_model.BaseModelConfig):
     max_target_len: int = 128
 
     def __post_init__(self):
+        if self.knowledge_insulation and not self.pi05:
+            raise ValueError("knowledge_insulation needs pi05")
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:
@@ -89,13 +91,6 @@ class Pi0Config(_model.BaseModelConfig):
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
             )
-            if self.knowledge_insulation:
-                observation_spec = dataclasses.replace(
-                    observation_spec,
-                    target_tokens=jax.ShapeDtypeStruct([batch_size, self.max_target_len], jnp.int32),
-                    target_mask=jax.ShapeDtypeStruct([batch_size, self.max_target_len], bool),
-                    target_is_fast=jax.ShapeDtypeStruct([batch_size, self.max_target_len], bool),
-                )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 
         return observation_spec, action_spec

@@ -9,7 +9,6 @@ import pytest
 
 from openpi.models import model as _model
 from openpi.models.pi0 import ki_masks
-from openpi.models.pi0 import make_attn_mask
 from openpi.models.pi0 import masked_mean_pool
 from openpi.models.pi0 import stage_ce_and_acc
 import openpi.models.pi0_config as _pi0_config
@@ -122,21 +121,15 @@ def test_compute_loss_and_stage_gives_flow_loss_and_stage_logits():
     assert logits.shape == (2, 7)
 
 
-def test_ki_masks_keep_the_prompt_bidirectional_and_the_targets_from_the_expert():
-    # 2 image tokens, 2 prompt tokens and a pad; 2 target tokens and a pad; 2 action tokens.
+def test_ki_masks_keep_the_prompt_bidirectional_and_the_targets_causal_after_it():
+    # 2 image tokens, 2 prompt tokens and a pad; 2 target tokens and a pad.
     prefix_mask = jnp.array([[True, True, True, True, False]])
-    target_mask = jnp.array([[True, True, False]])
-    input_mask, attn, expert = ki_masks(
-        prefix_mask, jnp.zeros(5, bool), target_mask, jnp.ones((1, 2), bool), jnp.array([True, False])
-    )
+    input_mask, attn = ki_masks(prefix_mask, jnp.zeros(5, bool), jnp.array([[True, True, False]]))
     assert input_mask[0].tolist() == [True, True, True, True, False, True, True, False]
     assert attn[0, :4, :4].all()  # images and prompt see each other both ways
     assert not attn[0, :5, 5:].any()  # and never the targets
     assert attn[0, 5].tolist() == [True, True, True, True, False, True, False, False]  # targets are causal
     assert attn[0, 6].tolist() == [True, True, True, True, False, True, True, False]
-    assert expert[0, :, :4].all()
-    assert not expert[0, :, 4:8].any()  # the expert never sees a target
-    assert expert[0, :, 8:].all()
 
 
 @pytest.fixture(scope="module")
@@ -160,7 +153,6 @@ def ki():
         tokenized_prompt_mask=jnp.asarray(prompt_mask),
         target_tokens=jnp.asarray(rng.integers(0, 1000, (2, 6)), jnp.int32),
         target_mask=jnp.array([[True] * 6, [True] * 4 + [False] * 2]),
-        target_is_fast=jnp.array([[False, False, True, True, True, True]] * 2),
     )
     return config, model, obs
 
@@ -175,6 +167,8 @@ def test_ki_flow_loss_ignores_the_targets_and_trains_only_the_expert(ki):
     assert stage_logits.shape == (2, config.num_stage_classes)
     assert jnp.array_equal(flow, other_flow)
     assert ce != other_ce
+    # the expert sees the prefix as inference computes it, so the flow loss is compute_loss's
+    np.testing.assert_allclose(flow, model.compute_loss(jax.random.key(1), obs, act), rtol=1e-5, atol=1e-6)
 
     grads = nnx.grad(lambda m: jnp.mean(m.compute_ki_loss(jax.random.key(1), obs, act)[0]))(model)
     flat = {"/".join(map(str, path)): np.abs(np.asarray(g.value)).max() for path, g in grads.flat_state().items()}
@@ -206,51 +200,3 @@ def test_ki_optimizer_splits_modules_by_the_loss_that_trains_them(ki):
     for a, b, label in zip(jax.tree.leaves(expert_only), jax.tree.leaves(mixed), jax.tree.leaves(labels), strict=True):
         if label == "expert":
             np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-12)
-
-
-def test_ki_action_loss_mask_drops_the_flow_and_fast_tokens_of_a_sample(ki):
-    config, model, obs = ki
-    act = jnp.ones((2, config.action_horizon, config.action_dim))
-    flow, ce, _ = model.compute_ki_loss(jax.random.key(1), obs, act)
-    masked = dataclasses.replace(obs, action_loss_mask=jnp.array([True, False]))
-    masked_flow, masked_ce, _ = model.compute_ki_loss(jax.random.key(1), masked, act)
-    assert jnp.array_equal(masked_flow[0], flow[0])
-    assert not masked_flow[1].any()
-    # without FAST tokens sample 1's cross-entropy is its two annotation tokens alone
-    no_fast = dataclasses.replace(
-        obs, target_is_fast=obs.target_is_fast.at[1].set(False), target_mask=obs.target_mask.at[1, 2:].set(False)
-    )
-    _, want_ce, _ = model.compute_ki_loss(jax.random.key(1), no_fast, act)
-    assert jnp.allclose(masked_ce, want_ce)
-    assert ce != masked_ce
-
-
-def _greedy_without_cache(model, obs, n):
-    """Greedy decoding that reruns the whole sequence for every token, as fast-eval-scripts/detect.py does."""
-    obs = _model.preprocess_observation(None, obs, train=False)
-    prefix_tokens, prefix_mask, prefix_ar_mask, n_img = model.embed_prefix(obs)
-    batch = jnp.arange(prefix_mask.shape[0])
-    last_prompt = n_img + jnp.sum(obs.tokenized_prompt_mask, axis=1) - 1
-    tokens = []
-    for _ in range(n):
-        emb, mask, ar = prefix_tokens, prefix_mask, prefix_ar_mask
-        if tokens:
-            decoded = jnp.stack(tokens, axis=1)
-            emb = jnp.concatenate([emb, model.PaliGemma.llm(decoded, method="embed")], axis=1)
-            mask = jnp.concatenate([mask, jnp.ones(decoded.shape, bool)], axis=1)
-            ar = jnp.concatenate([ar, jnp.ones(decoded.shape[1], bool)])
-        (out, _), _ = model.PaliGemma.llm([emb, None], mask=make_attn_mask(mask, ar), positions=jnp.cumsum(mask, 1) - 1)
-        last = out[:, -1] if tokens else out[batch, last_prompt]
-        tokens.append(jnp.argmax(model.PaliGemma.llm(last[:, None], method="deembed")[:, 0], axis=-1))
-    return jnp.stack(tokens, axis=1)
-
-
-def test_decode_annotation_matches_decoding_without_a_cache_and_stops_at_the_end_token(ki):
-    _, model, obs = ki
-    want = _greedy_without_cache(model, obs, 5)
-    assert jnp.array_equal(model.decode_annotation(obs, end_token=-1, max_tokens=5), want)
-    end = int(want[0, 2])
-    got = model.decode_annotation(obs, end_token=end, max_tokens=5)
-    assert got[0].tolist() == [*want[0, :3].tolist(), 0, 0]
-    stop = next((i for i, t in enumerate(want[1].tolist()) if t == end), 4)
-    assert got[1, : stop + 1].tolist() == want[1, : stop + 1].tolist()

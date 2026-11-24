@@ -295,8 +295,8 @@ class TokenizeKITargets(DataTransformFn):
             return data
         if annotation is not None and not isinstance(annotation, str):
             annotation = annotation.item()
-        tokens, mask, is_fast = self.tokenizer.tokenize(annotation, actions)
-        return {**data, "target_tokens": tokens, "target_mask": mask, "target_is_fast": is_fast}
+        tokens, mask = self.tokenizer.tokenize(annotation, actions)
+        return {**data, "target_tokens": tokens, "target_mask": mask}
 
 
 @dataclasses.dataclass(frozen=True)

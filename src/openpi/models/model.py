@@ -118,12 +118,9 @@ class Observation(Generic[ArrayT]):
     task_stage: at.Int[ArrayT, "*b"] | None = None
 
     # Knowledge insulation's targets for the backbone (tokenizer.KITargetTokenizer), trained on but never input at
-    # inference: the annotation and the FAST tokens, their mask, and which of them are FAST tokens.
+    # inference: the annotation and the FAST tokens, and their mask.
     target_tokens: at.Int[ArrayT, "*b t"] | None = None
     target_mask: at.Bool[ArrayT, "*b t"] | None = None
-    target_is_fast: at.Bool[ArrayT, "*b t"] | None = None
-    # False for a sample whose actions train nothing (no flow loss, no FAST cross-entropy); None for all True.
-    action_loss_mask: at.Bool[ArrayT, "*b"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -148,8 +145,6 @@ class Observation(Generic[ArrayT]):
             task_stage=data.get("task_stage"),
             target_tokens=data.get("target_tokens"),
             target_mask=data.get("target_mask"),
-            target_is_fast=data.get("target_is_fast"),
-            action_loss_mask=data.get("action_loss_mask"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
