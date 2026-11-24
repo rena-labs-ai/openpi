@@ -3,12 +3,11 @@ videos compute_norm_stats.py decodes: the state, and the actions as the model tr
 config's anchor, the gripper absolute), over the config's split. The actions get one set of stats over all steps of a
 chunk, or one per step (action_norm "per_timestep"). Quantiles are exact.
 
-    uv run scripts/compute_rena_norm_stats.py pi05_rena_nostate_ho_pts
+    uv run scripts/compute_rena_norm_stats.py --config-name pi05_rena_ho_nobox
 """
 
 import pathlib
 
-from lerobot.common.constants import HF_LEROBOT_HOME
 import numpy as np
 import pandas as pd
 import tyro
@@ -46,7 +45,7 @@ def main(config_name: str, out_dir: pathlib.Path | None = None) -> None:
     config = _config.get_config(config_name)
     factory = config.data
     data_config = factory.create(config.assets_dirs, config.model)
-    root = HF_LEROBOT_HOME / data_config.repo_id
+    root = factory.dataset_dir
     files = sorted((root / "data").rglob("episode_*.parquet"))
     keep = set(data_config.episodes) if data_config.episodes is not None else None
     states, actions = [], []

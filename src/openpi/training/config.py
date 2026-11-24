@@ -388,16 +388,23 @@ class LeRobotRenaDataConfig(DataConfigFactory):
     drop_stepped: bool = False
     action_sequence_keys: Sequence[str] = ("action",)
 
-    @override
-    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+    @property
+    def dataset_dir(self) -> pathlib.Path:
+        """Where the dataset is read from: base_config's root when it sets one, else LeRobot's cache."""
         from lerobot.common.constants import HF_LEROBOT_HOME
 
-        labels = HF_LEROBOT_HOME / self.repo_id / "meta/autolabel.jsonl"
-        split = rena_split(labels, self.site_holdout)
-        episodes = None if self.split == "all" else split[self.split]
-        if self.drop_stepped and self.split == "train":
+        root = self.base_config.root if self.base_config else None
+        return pathlib.Path(root) if root else HF_LEROBOT_HOME / self.repo_id
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        labels = self.dataset_dir / "meta/autolabel.jsonl"
+        # A serving host builds this config without the dataset; training without the labels fails at its first prompt.
+        split = rena_split(labels, self.site_holdout) if labels.exists() else None
+        episodes = None if split is None or self.split == "all" else split[self.split]
+        if split is not None and self.drop_stepped and self.split == "train":
             kept = split["train"] | split["holdout"] if episodes is None else episodes
-            episodes = kept - rena_stepped.stepped_episodes(HF_LEROBOT_HOME / self.repo_id)
+            episodes = kept - rena_stepped.stepped_episodes(self.dataset_dir)
         command = self.anchor == "command"
         repack_transform = _transforms.Group(
             inputs=[

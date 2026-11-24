@@ -3,6 +3,7 @@ import json
 
 import jax
 import numpy as np
+import pytest
 
 from openpi import transforms as _transforms
 import openpi.models.pi0_config as _pi0_config
@@ -86,3 +87,15 @@ def test_a_masked_out_grounded_image_changes_no_flow_loss():
     np.testing.assert_array_equal(
         model.compute_loss(jax.random.key(1), masked, act), model.compute_loss(jax.random.key(1), other, act)
     )
+
+
+def test_a_rena_config_builds_without_its_labels_as_a_serving_host_does(tmp_path):
+    factory = _config.LeRobotRenaDataConfig(
+        repo_id="rena/absent", base_config=_config.DataConfig(prompt_from_task=True, root=str(tmp_path)), split="train"
+    )
+    assert factory.dataset_dir == tmp_path
+    data_config = factory.create(tmp_path / "assets", _pi0_config.Pi0Config(pi05=True))
+    assert data_config.episodes is None
+    prompter = next(t for t in data_config.repack_transforms.inputs if isinstance(t, rena_policy.AutolabelPrompt))
+    with pytest.raises(FileNotFoundError):
+        prompter({"episode_index": 0, "frame_index": 0, "prompt": "pick toy"})

@@ -18,6 +18,7 @@ argmax, as rena-training's serving returns them.
 """
 
 import dataclasses
+import functools
 import json
 import pathlib
 from typing import Literal
@@ -120,9 +121,10 @@ class AutolabelPrompt(transforms.DataTransformFn):
     # Fixes each frame's draw, for evaluations that must give every model the same prompts.
     seed: int | None = None
 
-    def __post_init__(self):
+    @functools.cached_property
+    def _records(self) -> dict[int, dict]:
         lines = pathlib.Path(self.labels_path).read_text().splitlines()
-        object.__setattr__(self, "_records", {(rec := json.loads(line))["episode_index"]: rec for line in lines})
+        return {(rec := json.loads(line))["episode_index"]: rec for line in lines}
 
     @property
     def mix(self):
