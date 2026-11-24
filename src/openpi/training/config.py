@@ -951,7 +951,8 @@ _CONFIGS = [
         for name, kw in (
             ("pi05_rena_ho_boximg_nostepped", {"drop_stepped": True}),
             ("pi05_rena_ho_boximg_interp", {"repo_id": "rena/rena_autolabel_v3_interp"}),
-            # v4 (v3 and the unlabelled_dep batch, merge_rena_datasets.py) without the Toronto office, scored on it apart
+            # v4 (v3 merged with the next labelled batch by merge_rena_datasets.py) without the Toronto office, scored
+            # on it apart
             ("pi05_rena_tor_interp", {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO}),
         )
     ),

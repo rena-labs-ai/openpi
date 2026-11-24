@@ -317,7 +317,6 @@ def main(config: _config.TrainConfig):
     )
     holdouts = {}
     if config.holdout_interval:
-        # the site (an office held out whole) is scored apart from the recordings held out at random
         splits = ("holdout", "site") if getattr(config.data, "site_holdout", ()) else ("holdout",)
         for split in splits:
             holdouts[split] = _holdout.load(
@@ -348,7 +347,6 @@ def main(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            # the step time is the wall time per step; the data wait, the part of it spent waiting for batches
             now = time.monotonic()
             reduced_info |= {
                 "lr": float(lr_schedule(step)),
