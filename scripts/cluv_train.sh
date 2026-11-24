@@ -6,9 +6,9 @@
 # pi0.5 training through cluv, on whichever cluster and allocation starts it first:
 #   cluv submit first scripts/cluv_train.sh [sbatch flags] -- CONFIG EXP_NAME [train.py flags]
 # Each cluster holds the data in $SCRATCH/rena-data (the LeRobot dataset in lerobot_home, openpi's cache with pi05_base
-# and the tokenizer in openpi_cache) and the checkpoints in $SCRATCH/openpi-checkpoints. The job shards the model over all the GPUs it got, resumes its own
-# checkpoints, so `cluv submit --chunking` can split it into short jobs, and writes the config's norm stats first, from
-# whichever dataset the config names.
+# and the tokenizer in openpi_cache) and the checkpoints in $SCRATCH/openpi-checkpoints. The job shards the model over
+# all the GPUs it got, resumes its own checkpoints, so `cluv submit --chunking` can split it into short jobs, and writes
+# the config's norm stats first, from whichever dataset the config names.
 set -euo pipefail
 config=$1 exp=$2
 shift 2
