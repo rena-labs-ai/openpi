@@ -122,13 +122,12 @@ def test_compute_loss_and_stage_gives_flow_loss_and_stage_logits():
 
 
 def test_ki_masks_keep_the_prompt_bidirectional_and_the_targets_causal_after_it():
-    # 2 image tokens, 2 prompt tokens and a pad; 2 target tokens and a pad.
     prefix_mask = jnp.array([[True, True, True, True, False]])
     input_mask, attn = ki_masks(prefix_mask, jnp.zeros(5, bool), jnp.array([[True, True, False]]))
     assert input_mask[0].tolist() == [True, True, True, True, False, True, True, False]
-    assert attn[0, :4, :4].all()  # images and prompt see each other both ways
-    assert not attn[0, :5, 5:].any()  # and never the targets
-    assert attn[0, 5].tolist() == [True, True, True, True, False, True, False, False]  # targets are causal
+    assert attn[0, :4, :4].all()
+    assert not attn[0, :5, 5:].any()
+    assert attn[0, 5].tolist() == [True, True, True, True, False, True, False, False]
     assert attn[0, 6].tolist() == [True, True, True, True, False, True, True, False]
 
 
@@ -167,7 +166,6 @@ def test_ki_flow_loss_ignores_the_targets_and_trains_only_the_expert(ki):
     assert stage_logits.shape == (2, config.num_stage_classes)
     assert jnp.array_equal(flow, other_flow)
     assert ce != other_ce
-    # the expert sees the prefix as inference computes it, so the flow loss is compute_loss's
     np.testing.assert_allclose(flow, model.compute_loss(jax.random.key(1), obs, act), rtol=1e-5, atol=1e-6)
 
     grads = nnx.grad(lambda m: jnp.mean(m.compute_ki_loss(jax.random.key(1), obs, act)[0]))(model)
@@ -191,7 +189,6 @@ def test_ki_optimizer_splits_modules_by_the_loss_that_trains_them(ki):
         for t, label in zip(jax.tree.leaves(trained), jax.tree.leaves(labels), strict=True):
             assert label == module or not t
 
-    # A backbone gradient a thousand times larger leaves the expert's step as it was.
     params = nnx.state(model, nnx.Param)
     tx = _optimizer.AdamW(clip_per_module=True).create(1e-3)
     both = jax.tree.map(lambda f, c: f + 1e3 * c, flow_grads, ce_grads)

@@ -64,7 +64,6 @@ class OptimizerConfig(Protocol):
     ) -> optax.GradientTransformation: ...
 
 
-# pi0's action expert: its own Gemma weights (named with a _1 suffix beside the backbone's) and the layers around it.
 _EXPERT = re.compile(
     r"PaliGemma/llm/.*_1(/|$)|^(action_in_proj|action_out_proj|time_mlp_in|time_mlp_out|state_proj|"
     r"action_time_mlp_in|action_time_mlp_out)/"
@@ -101,9 +100,7 @@ class AdamW(OptimizerConfig):
     # Changing this to 0 can cause out-of-memory errors for some reason, so we set it to a negligible value.
     weight_decay: float = 1e-10
     clip_gradient_norm: float = 1.0
-    # Clip the backbone and the action expert each on its own gradient norm (module_labels). With knowledge insulation
-    # the two learn from different losses, so one clip on the sum would scale the expert's steps by the backbone's
-    # gradient.
+    # Clip the backbone and the action expert each on its own gradient norm (module_labels).
     clip_per_module: bool = False
 
     def create(

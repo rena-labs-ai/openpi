@@ -46,8 +46,8 @@ def stats(x: np.ndarray, axis) -> normalize.NormStats:
 def main(config_name: str, out_dir: pathlib.Path | None = None) -> None:
     config = _config.get_config(config_name)
     factory = config.data
-    # Built without the assets dir: the stats it holds may be the stale ones this script replaces.
-    data_config = factory.create(pathlib.Path(tempfile.mkdtemp()), config.model)
+    assets_without_stats = pathlib.Path(tempfile.mkdtemp())
+    data_config = factory.create(assets_without_stats, config.model)
     root = factory.dataset_dir
     files = sorted((root / "data").rglob("episode_*.parquet"))
     keep = set(data_config.episodes) if data_config.episodes is not None else None
@@ -67,7 +67,6 @@ def main(config_name: str, out_dir: pathlib.Path | None = None) -> None:
         "actions": stats(action, 0) if per_step else stats(action.reshape(-1, action.shape[-1]), 0),
     }
     if isinstance(config.model, pi0_config.Pi0Config) and config.model.knowledge_insulation:
-        # the FAST target's, over every step of a chunk whatever action_norm is (transforms.FASTActions)
         norm["fast_actions"] = stats(action.reshape(-1, action.shape[-1]), 0)
     out = out_dir or config.assets_dirs / data_config.asset_id
     normalize.save(out, norm)

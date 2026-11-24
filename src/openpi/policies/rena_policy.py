@@ -105,6 +105,11 @@ def make_rena_example() -> dict:
     }
 
 
+def without_parentheticals(text: str) -> str:
+    """argus's text without the parentheticals it tells like objects apart with ("(left)"), as commands drop them."""
+    return re.sub(r"\s*\(.*?\)", "", text)
+
+
 def annotation(rec: dict, frame: int, *, boxes: bool) -> str:
     """A frame's annotation for knowledge insulation to train the backbone on, from its rena-autolabel labels: the skill
     in the task grammar with argus's names; with boxes, the skill target's box on each camera that sees it from the
@@ -127,8 +132,7 @@ def annotation(rec: dict, frame: int, *, boxes: bool) -> str:
     timeline = (rec.get("argus_labels") or {}).get("timeline") or []
     if row := next((r for r in timeline if r["start_s"] <= t < r["end_s"]), None):
         where = " ".join(x for x in (row.get("spatial_relation"), row.get("destination")) if x)
-        # argus tells like objects apart with a parenthetical ("(left)"), as join_argus drops it from commands
-        phase = re.sub(r"\s*\(.*?\)", "", f"{row['action']}: {row['object']}" + (f", {where}" if where else ""))
+        phase = without_parentheticals(f"{row['action']}: {row['object']}" + (f", {where}" if where else ""))
         text += f"; {phase}"
     return text
 

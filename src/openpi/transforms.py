@@ -183,8 +183,8 @@ class Unnormalize(DataTransformFn):
 
 @dataclasses.dataclass(frozen=True)
 class FASTActions(DataTransformFn):
-    """The actions quantile-normalised with stats over every step of a chunk, as fast_actions for the FAST target,
-    which wants one scale for the whole chunk however the flow target is normalised. Runs before Normalize."""
+    """The actions quantile-normalised with stats over every step of a chunk, as fast_actions for the FAST target.
+    Runs before Normalize."""
 
     norm_stats: NormStats
 

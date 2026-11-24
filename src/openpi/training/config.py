@@ -442,8 +442,6 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             self.action_norm == "per_timestep"
         ):
             raise ValueError(f"{base.asset_id}'s action norm stats are not {self.action_norm}")
-        # The FAST target's stats are over every step of a chunk (compute_rena_norm_stats.py writes them as
-        # fast_actions), kept out of the norm stats, so serving's Unnormalize never looks for them.
         fast_stats = None
         if base.norm_stats is not None:
             fast_stats = base.norm_stats.get("fast_actions") if ki else None
@@ -739,7 +737,6 @@ def _rena(
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params", paligemma_locs=knowledge_insulation
         ),
-        # Knowledge insulation clips the backbone and the expert apart (optimizer.AdamW.clip_per_module).
         optimizer=_optimizer.AdamW(clip_per_module=knowledge_insulation),
         stage_loss_weight=0.03,
         holdout_interval=1000 if split == "train" else 0,
@@ -985,13 +982,12 @@ _CONFIGS = [
         for name, kw in (
             ("pi05_rena_ho_boximg_nostepped", {"drop_stepped": True}),
             ("pi05_rena_ho_boximg_interp", {"repo_id": "rena/rena_autolabel_v3_interp"}),
-            # with knowledge insulation: the backbone learns the frame's annotation and the chunk's FAST tokens
             (
                 "pi05_rena_ho_ki",
                 {"repo_id": "rena/rena_autolabel_v3_interp", "knowledge_insulation": True},
             ),
             # v4 (v3 merged with the next labelled batch by merge_rena_datasets.py) without the Toronto office, scored
-            # on it apart: flow only, then with knowledge insulation
+            # on it apart
             ("pi05_rena_tor_interp", {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO}),
             (
                 "pi05_rena_tor_ki",

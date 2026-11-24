@@ -168,7 +168,6 @@ class KITargetTokenizer:
 
     @functools.cached_property
     def _fast_tokenizer(self):
-        # Loaded with the first target, so serving, which never makes one, needs neither the download nor its code.
         return AutoProcessor.from_pretrained(self._fast_tokenizer_path, trust_remote_code=True)
 
     def tokenize(self, annotation: str | None, actions: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:

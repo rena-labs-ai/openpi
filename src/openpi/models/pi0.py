@@ -44,6 +44,13 @@ def make_attn_mask(input_mask, mask_ar):
     return jnp.logical_and(attn_mask, valid_mask)
 
 
+def target_predictors(out, last_prompt, n_prefix):
+    """The outputs [b, t, d] that predict each target token: the prompt's last token for the first target, then each
+    target for the next."""
+    first = out[jnp.arange(out.shape[0]), last_prompt][:, None]
+    return jnp.concatenate([first, out[:, n_prefix:-1]], axis=1)
+
+
 def ki_masks(prefix_mask, prefix_ar_mask, target_mask):
     """Knowledge insulation's backbone pass over [images | prompt | targets]: the prefix bidirectional and the targets
     causal after it. Returns the input mask [b, p + t] and the attention mask [b, p + t, p + t]."""
@@ -238,7 +245,6 @@ class Pi0(_model.BaseModel):
         return prefix_out, prefix_mask, n_img_tokens, suffix_out
 
     def _flow_inputs(self, rng, observation, actions, *, train):
-        """The preprocessed observation, the noised actions x_t, the velocity u_t they should give, and their time."""
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
         batch_shape = actions.shape[:-2]
@@ -281,8 +287,7 @@ class Pi0(_model.BaseModel):
 
     def compute_ki_loss(self, rng, observation, actions, *, train=False):
         """Knowledge insulation's losses, from one backbone pass over [images | prompt | targets] and one action expert
-        pass over the images' and prompt's keys and values through a stop_gradient. The prefix never attends to the
-        targets, so its keys and values are the ones inference computes, and the flow loss equals compute_loss's.
+        pass over the images' and prompt's keys and values through a stop_gradient.
 
         Returns the flow loss [b, ah], the mean cross-entropy of the target tokens, and the stage head's logits."""
         observation, x_t, u_t, time = self._flow_inputs(rng, observation, actions, train=train)
@@ -296,11 +301,9 @@ class Pi0(_model.BaseModel):
             positions=jnp.cumsum(input_mask, axis=1) - 1,
         )
 
-        # Each target token is predicted from the one before it, the first from the prompt's last token.
         n_prefix = prefix_tokens.shape[1]
         last_prompt = n_img_tokens + jnp.sum(observation.tokenized_prompt_mask, axis=1) - 1
-        before = jnp.concatenate([out[jnp.arange(out.shape[0]), last_prompt][:, None], out[:, n_prefix:-1]], axis=1)
-        logits = self.PaliGemma.llm(before, method="deembed")
+        logits = self.PaliGemma.llm(target_predictors(out, last_prompt, n_prefix), method="deembed")
         picked = jnp.take_along_axis(logits, observation.target_tokens[..., None], axis=-1)[..., 0]
         nll = jax.nn.logsumexp(logits, axis=-1) - picked
         ce = jnp.sum(nll * observation.target_mask) / jnp.maximum(jnp.sum(observation.target_mask), 1)

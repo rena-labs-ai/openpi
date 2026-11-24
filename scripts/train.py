@@ -152,7 +152,6 @@ def train_step(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
         if isinstance(config.model, _pi0_config.Pi0Config) and config.model.knowledge_insulation:
-            # The two losses train disjoint parameters (compute_ki_loss), so their sum weighs neither against the other.
             chunked_loss, target_ce, stage_logits = model.compute_ki_loss(rng, observation, actions, train=True)
             flow = jnp.mean(chunked_loss)
             loss, aux = target_ce + flow, {"target_ce": target_ce}
