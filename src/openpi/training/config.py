@@ -97,8 +97,6 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
-    # LeRobot episodes to train on; all when None.
-    episodes: Sequence[int] | None = None
     # Steps before the frame that each action sequence also carries, for transforms that read earlier actions.
     action_lookback: int = 0
 
