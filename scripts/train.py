@@ -204,7 +204,10 @@ def train_step(
 
 
 def flow_by_step(chunked_loss: at.Array) -> dict[str, at.Array]:
-    """The flow loss [b, horizon] over the steps a robot executes and over the rest of the chunk."""
+    """The flow loss [b, horizon] over the steps a robot executes and over the rest of the chunk; nothing for a loss
+    that is one value per sample, as FAST models give."""
+    if chunked_loss.ndim != 2:
+        return {}
     return {
         "flow_loss_executed": jnp.mean(chunked_loss[:, : _holdout.EXECUTED]),
         "flow_loss_rest": jnp.mean(chunked_loss[:, _holdout.EXECUTED :]),
