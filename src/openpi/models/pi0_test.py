@@ -12,6 +12,7 @@ from openpi.models.pi0 import ki_masks
 from openpi.models.pi0 import masked_mean_pool
 from openpi.models.pi0 import stage_ce_and_acc
 import openpi.models.pi0_config as _pi0_config
+import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.optimizer as _optimizer
 
 
@@ -181,15 +182,21 @@ def test_ki_flow_loss_ignores_the_targets_and_trains_only_the_expert(ki):
 def test_ki_optimizer_splits_modules_by_the_loss_that_trains_them(ki):
     config, model, obs = ki
     act = jnp.asarray(np.random.default_rng(1).normal(size=(2, config.action_horizon, config.action_dim)), jnp.float32)
-    flow_grads = nnx.grad(lambda m: jnp.mean(m.compute_ki_loss(jax.random.key(1), obs, act)[0]))(model)
-    ce_grads = nnx.grad(lambda m: m.compute_ki_loss(jax.random.key(1), obs, act)[1])(model)
-    labels = _optimizer.module_labels(nnx.state(model, nnx.Param))
+    # without the image encoder, whose full-size gradients and optimizer state would not fit a small GPU
+    params = nnx.All(nnx.Param, nnx.Not(nnx_utils.PathRegex("PaliGemma/img/.*")))
+    flow_grads = nnx.grad(
+        lambda m: jnp.mean(m.compute_ki_loss(jax.random.key(1), obs, act)[0]), argnums=nnx.DiffState(0, params)
+    )(model)
+    ce_grads = nnx.grad(lambda m: m.compute_ki_loss(jax.random.key(1), obs, act)[1], argnums=nnx.DiffState(0, params))(
+        model
+    )
+    labels = _optimizer.module_labels(nnx.state(model, params))
     for grads, module in ((flow_grads, "expert"), (ce_grads, "backbone")):
         trained = jax.tree.map(lambda g: bool(jnp.any(g != 0)), grads)
         for t, label in zip(jax.tree.leaves(trained), jax.tree.leaves(labels), strict=True):
             assert label == module or not t
 
-    params = nnx.state(model, nnx.Param)
+    params = nnx.state(model, params)
     tx = _optimizer.AdamW(clip_per_module=True).create(1e-3)
     both = jax.tree.map(lambda f, c: f + 1e3 * c, flow_grads, ce_grads)
     expert_only, _ = tx.update(flow_grads, tx.init(params), params)
