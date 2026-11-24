@@ -158,13 +158,13 @@ env = { SCRATCH = "$HOME/scratch" }
 requeue = true
 open-mode = "append"  # a requeued job adds to its log instead of writing over it
 
-# Out of the race: H100s only for the KI runs (2026-11-23).
-# [tool.cluv.clusters.mila]
-# env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
-# sbatch_args = [
-#     { partition = "long", gres = "gpu:l40s:4", cpus-per-task = 24, mem = "192G", exclude = "cn-g028" },
-#     { partition = "long", gres = "gpu:a100l:2", mem = "192G", exclude = "cn-g028" },
-# ]  # cn-g028: both runs failed there within two minutes of a requeue (2026-11-17)
+# Raced again (2026-11-24): uploads to the DRAC clusters were crawling and Fir's login hung.
+[tool.cluv.clusters.mila]
+env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
+sbatch_args = [
+    { partition = "long", gres = "gpu:l40s:4", cpus-per-task = 24, mem = "192G", exclude = "cn-g028" },
+    { partition = "long", gres = "gpu:a100l:2", mem = "192G", exclude = "cn-g028" },
+]  # cn-g028: both runs failed there within two minutes of a requeue (2026-11-17)
 
 # Out of the race: nibi has a planned outage (2026-11-24 to 25).
 # [tool.cluv.clusters.nibi]
