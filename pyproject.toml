@@ -148,3 +148,62 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 markers = ["manual: should be run manually."]
 testpaths = ["src", "scripts", "packages"]
+# cluv (https://mila-iqia.github.io/cluv/) races a job across clusters and allocations, keeping whichever starts first:
+#   cluv submit first scripts/cluv_train.sh -- CONFIG EXP_NAME [train.py flags]
+# Full fine-tuning of pi0.5 needs 4 GPUs of 48GB or 2 of 80GB; scripts/cluv_train.sh shards over the ones it gets.
+[tool.cluv]
+job_script_path = "scripts/cluv_train.sh"
+results_path = "$SCRATCH/cluv/openpi"
+project_dir = "$SCRATCH/repos/openpi"
+
+[tool.cluv.env]
+# Compute nodes without internet by default; the clusters below that have it say so.
+UV_OFFLINE = "1"
+WANDB_MODE = "offline"
+WANDB_DIR = "$SCRATCH/wandb"
+WANDB_ENTITY = "akuramshin-universit-de-montr-al"
+
+[tool.cluv.local]
+env = { SCRATCH = "$HOME/scratch" }
+
+[tool.cluv.sbatch_args]
+requeue = true
+open-mode = "append"  # a requeued job adds to its log instead of writing over it
+
+# Raced again (2026-11-24): uploads to the DRAC clusters were crawling and Fir's login hung.
+[tool.cluv.clusters.mila]
+env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
+sbatch_args = [
+    { partition = "long", gres = "gpu:l40s:4", cpus-per-task = 24, mem = "192G", exclude = "cn-g028" },
+    { partition = "long", gres = "gpu:a100l:2", mem = "192G", exclude = "cn-g028" },
+]  # cn-g028: both runs failed there within two minutes of a requeue (2026-11-17)
+
+# Out of the race: nibi has a planned outage (2026-11-24 to 25).
+# [tool.cluv.clusters.nibi]
+# env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
+# sbatch_args = [
+#     { account = "def-kdarvish", gpus-per-node = "h100:2" },
+#     { account = "rrg-bengioy-ad", gpus-per-node = "h100:2" },
+#     { account = "def-gberseth", gpus-per-node = "h100:2" },
+# ]
+
+[tool.cluv.clusters.fir]
+env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
+# CUDA could not open these nodes' GPUs (2026-11-23).
+sbatch_args = [
+    { account = "def-kdarvish", gpus-per-node = "h100:2", exclude = "fc10513,fc10608,fc10612" },
+    { account = "rrg-bengioy-ad", gpus-per-node = "h100:2", exclude = "fc10513,fc10608,fc10612" },
+    { account = "def-gberseth", gpus-per-node = "h100:2", exclude = "fc10513,fc10608,fc10612" },
+]
+
+[tool.cluv.clusters.rorqual]
+# Compute nodes have no internet: the FAST tokenizer loads from $SCRATCH/rena-data/hf_cache.
+env = { HF_HUB_OFFLINE = "1" }
+# Half a node: a checkpoint save went past the job script's 128G (2026-11-17).
+sbatch_args = [
+    { account = "rrg-bengioy-ad", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G" },
+    { account = "rrg-gberseth", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G" },
+    { account = "def-gberseth", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G" },
+    { account = "def-kdarvish", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G" },
+]
+# Not yet: narval's A100s have 40GB, which full fine-tuning has not been tried on, and tamia cannot reach GitHub.
