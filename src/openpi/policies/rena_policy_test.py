@@ -21,12 +21,20 @@ def test_target_box_is_outlined_in_magenta_on_its_camera_only():
     assert "target_boxes" not in out
 
 
-def test_client_request_fills_the_three_slots_and_state():
+def test_client_request_fills_the_three_camera_slots_and_masks_out_the_grounded_one():
     out = rena_policy.RenaInputs()(rena_policy.make_rena_example())
     assert {slot: im.shape for slot, im in out["image"].items()} == {
         "base_0_rgb": (480, 640, 3),
         "left_wrist_0_rgb": (480, 640, 3),
         "right_wrist_0_rgb": (640, 480, 3),
+        "grounded_rgb": (480, 640, 3),
+    }
+    assert not out["image"]["grounded_rgb"].any()
+    assert {slot: bool(m) for slot, m in out["image_mask"].items()} == {
+        "base_0_rgb": True,
+        "left_wrist_0_rgb": True,
+        "right_wrist_0_rgb": True,
+        "grounded_rgb": False,
     }
     assert out["state"].tolist() == [0.0] * 7
     assert out["prompt"] == "pick toy fruit"

@@ -63,9 +63,11 @@ class RenaInputs(transforms.DataTransformFn):
         boxes = data.get("target_boxes") or {}
         images = {cam: _parse_image(data[f"observation.images.{cam}"]) for cam in CAMERAS.values()}
         images = {cam: draw_box(im, boxes[cam]) if cam in boxes else im for cam, im in images.items()}
+        # The model's grounded_rgb input carries no rena camera: blank and masked out, so it changes no output.
         inputs = {
-            "image": {slot: images[cam] for slot, cam in CAMERAS.items()},
-            "image_mask": dict.fromkeys(CAMERAS, np.True_),
+            "image": {slot: images[cam] for slot, cam in CAMERAS.items()}
+            | {"grounded_rgb": np.zeros_like(images[CAMERAS["base_0_rgb"]])},
+            "image_mask": dict.fromkeys(CAMERAS, np.True_) | {"grounded_rgb": np.False_},
             "state": np.asarray(data["observation.state"], dtype=np.float32),
         }
         if "actions" in data:
