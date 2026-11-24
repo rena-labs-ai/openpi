@@ -43,13 +43,17 @@ def column_stats(v: np.ndarray) -> dict:
 
 
 def main(srcs: list[str], dst: str, timelines: pathlib.Path | None = None) -> None:
-    out = HF_LEROBOT_HOME / dst
+    out = (HF_LEROBOT_HOME / dst).resolve()
+    for src in ((HF_LEROBOT_HOME / s).resolve() for s in srcs):
+        if out == src or out in src.parents or src in out.parents:
+            raise SystemExit(f"{dst} overlaps the source {src}: redoing the output would delete it")
     if out.exists():
         shutil.rmtree(out)
     (out / "meta").mkdir(parents=True)
     timeline = {} if timelines is None else {r["source_key"]: r["timeline"] for r in jsonl(timelines)}
     infos = [json.loads((HF_LEROBOT_HOME / s / "meta/info.json").read_text()) for s in srcs]
-    assert all(i["features"] == infos[0]["features"] for i in infos), "the datasets' features differ"
+    layout = ("features", "chunks_size", "data_path", "video_path", "fps")
+    assert all(i[k] == infos[0][k] for i in infos for k in layout), f"the datasets differ in one of {layout}"
     info = infos[0]
     data_path, video_path, chunk = info["data_path"], info["video_path"], info["chunks_size"]
     videos = [k for k, f in info["features"].items() if f["dtype"] == "video"]
