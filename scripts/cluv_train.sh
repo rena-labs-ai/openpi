@@ -6,8 +6,7 @@
 # pi0.5 training through cluv, on whichever cluster and allocation starts it first:
 #   cluv submit first scripts/cluv_train.sh [sbatch flags] -- CONFIG EXP_NAME [train.py flags]
 # Each cluster holds the data in $SCRATCH/rena-data (the LeRobot dataset in lerobot_home, openpi's cache with pi05_base
-# and the tokenizer in openpi_cache, the pure-Python autolabel_prompts and rena_task_grammar in python) and the
-# checkpoints in $SCRATCH/openpi-checkpoints. The job shards the model over all the GPUs it got, resumes its own
+# and the tokenizer in openpi_cache) and the checkpoints in $SCRATCH/openpi-checkpoints. The job shards the model over all the GPUs it got, resumes its own
 # checkpoints, so `cluv submit --chunking` can split it into short jobs, and writes the config's norm stats first, from
 # whichever dataset the config names.
 set -euo pipefail
@@ -15,7 +14,9 @@ config=$1 exp=$2
 shift 2
 data=$SCRATCH/rena-data
 ckpt=$SCRATCH/openpi-checkpoints
-export HF_LEROBOT_HOME=$data/lerobot_home OPENPI_DATA_HOME=$data/openpi_cache HF_HOME=$data/hf_cache PYTHONPATH=$data/python
+export HF_LEROBOT_HOME=$data/lerobot_home OPENPI_DATA_HOME=$data/openpi_cache HF_HOME=$data/hf_cache
+# the prompt sampler and task grammar the rena configs train with, pinned in deps/ (scripts/bump_rena_dep.sh)
+export PYTHONPATH=$PWD/third_party/autolabel-prompts/src:$PWD/third_party/rena-task-grammar/src
 export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 PYTHONUNBUFFERED=1
 module load ffmpeg 2>/dev/null || true # the video decoder's libraries, on the DRAC clusters
 py=(uv run --no-sync python)

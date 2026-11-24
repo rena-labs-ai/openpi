@@ -39,7 +39,8 @@ cluv status                                    # GPUs free, cluv jobs
 | Logs | `$SCRATCH/cluv/openpi/<cluster>_<jobid>/slurm-<jobid>.out` |
 
 - `openpi_cache` holds pi05_base and the tokenizer.
-- `python` holds `autolabel_prompts` and `rena_task_grammar`, which are on `PYTHONPATH`.
+- `autolabel_prompts` and `rena_task_grammar` come from the repo's `third_party/`, pinned in `deps/` (bump with
+  `scripts/bump_rena_dep.sh`), not from `$SCRATCH/rena-data/python`.
 - The script computes the config's norm stats at the start of every job, about a minute from the parquet files.
 
 ## GPUs
