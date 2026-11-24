@@ -37,3 +37,35 @@ def test_tokenize_drop_state_keeps_the_pi05_format_without_the_state():
         sentencepiece.decode([int(t) for t, m in zip(without, mask, strict=True) if m]) == "Task: pick toy;\nAction: "
     )
     assert "State: 128 128" in sentencepiece.decode([int(t) for t in with_state])
+
+
+def test_ki_fast_ids_round_trip_below_the_loc_tokens():
+    tokenizer = _tokenizer.KITargetTokenizer(max_len=128)
+    sentencepiece = tokenizer._tokenizer  # noqa: SLF001
+    every = np.arange(2048)
+    assert _tokenizer.ki_fast_ids(every).min() == 253_952
+    assert _tokenizer.ki_fast_ids(every).max() == 255_999
+    assert (_tokenizer.ki_fast_ids(_tokenizer.ki_fast_ids(every)) == every).all()
+    assert sentencepiece.id_to_piece(256_000) == "<loc0000>"
+    actions = np.cumsum(np.random.default_rng(0).normal(0, 0.05, (50, 7)), axis=0).clip(-1, 1)
+    ids = tokenizer.fast_ids(actions)
+    assert ((ids >= 253_952) & (ids < 256_000)).all()
+    fast = tokenizer._fast_tokenizer  # noqa: SLF001
+    error = np.abs(fast.decode([_tokenizer.ki_fast_ids(ids).tolist()], time_horizon=50, action_dim=7)[0] - actions)
+    assert error.mean() < 0.05
+    assert error.max() < 0.15
+
+
+def test_ki_targets_are_the_annotation_then_fast_tokens():
+    tokenizer = _tokenizer.KITargetTokenizer(max_len=128)
+    sentencepiece = tokenizer._tokenizer  # noqa: SLF001
+    actions = np.zeros((50, 7))
+    tokens, mask = tokenizer.tokenize("pick toy at Right: <loc0001><loc0002><loc0003><loc0004>", actions)
+    n_text = int(np.argmax(tokens == tokenizer.end_of_annotation)) + 1
+    n = int(mask.sum())
+    assert tokens[n_text - 5 : n_text - 1].tolist() == [256_001, 256_002, 256_003, 256_004]
+    assert sentencepiece.decode(tokens[: n_text - 5].tolist()) == "pick toy at Right: "
+    assert (tokens[n_text : n - 1] == tokenizer.fast_ids(actions)).all()
+    assert tokens[n - 1] == sentencepiece.eos_id()
+    only_text, text_mask = tokenizer.tokenize("pick toy", None)
+    assert sentencepiece.decode(only_text[: text_mask.sum()].tolist()) == "pick toy\n"

@@ -44,6 +44,21 @@ def make_attn_mask(input_mask, mask_ar):
     return jnp.logical_and(attn_mask, valid_mask)
 
 
+def target_predictors(out, last_prompt, n_prefix):
+    """The outputs [b, t, d] that predict each target token: the prompt's last token for the first target, then each
+    target for the next."""
+    first = out[jnp.arange(out.shape[0]), last_prompt][:, None]
+    return jnp.concatenate([first, out[:, n_prefix:-1]], axis=1)
+
+
+def ki_masks(prefix_mask, prefix_ar_mask, target_mask):
+    """Knowledge insulation's backbone pass over [images | prompt | targets]: the prefix bidirectional and the targets
+    causal after it. Returns the input mask [b, p + t] and the attention mask [b, p + t, p + t]."""
+    input_mask = jnp.concatenate([prefix_mask, target_mask], axis=1)
+    ar_mask = jnp.concatenate([prefix_ar_mask, jnp.ones(target_mask.shape[1], dtype=jnp.bool_)])
+    return input_mask, make_attn_mask(input_mask, ar_mask)
+
+
 @at.typecheck
 def posemb_sincos(
     pos: at.Real[at.Array, " b"], embedding_dim: int, min_period: float, max_period: float
@@ -229,20 +244,23 @@ class Pi0(_model.BaseModel):
         )
         return prefix_out, prefix_mask, n_img_tokens, suffix_out
 
-    @override
-    @at.typecheck
-    def compute_loss(
-        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
-    ) -> at.Float[at.Array, "*b ah"]:
+    def _flow_inputs(self, rng, observation, actions, *, train):
         preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
         observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
-
         batch_shape = actions.shape[:-2]
         noise = jax.random.normal(noise_rng, actions.shape)
         time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
         time_expanded = time[..., None, None]
         x_t = time_expanded * noise + (1 - time_expanded) * actions
         u_t = noise - actions
+        return observation, x_t, u_t, time
+
+    @override
+    @at.typecheck
+    def compute_loss(
+        self, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions, *, train: bool = False
+    ) -> at.Float[at.Array, "*b ah"]:
+        observation, x_t, u_t, time = self._flow_inputs(rng, observation, actions, train=train)
 
         # one big forward pass of prefix + suffix at once
         _prefix_out, _prefix_mask, _n_img_tokens, suffix_out = self._forward(observation, x_t, time)
@@ -260,19 +278,54 @@ class Pi0(_model.BaseModel):
 
     def compute_loss_and_stage(self, rng, observation, actions, *, train=False):
         """Like compute_loss, but also returns the stage head's raw logits."""
-        preprocess_rng, noise_rng, time_rng = jax.random.split(rng, 3)
-        observation = _model.preprocess_observation(preprocess_rng, observation, train=train)
-        batch_shape = actions.shape[:-2]
-        noise = jax.random.normal(noise_rng, actions.shape)
-        time = jax.random.beta(time_rng, 1.5, 1, batch_shape) * 0.999 + 0.001
-        time_expanded = time[..., None, None]
-        x_t = time_expanded * noise + (1 - time_expanded) * actions
-        u_t = noise - actions
+        observation, x_t, u_t, time = self._flow_inputs(rng, observation, actions, train=train)
         prefix_out, prefix_mask, n_img_tokens, suffix_out = self._forward(observation, x_t, time)
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         flow_loss = jnp.mean(jnp.square(v_t - u_t), axis=-1)
         stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
         return flow_loss, stage_logits
+
+    def compute_ki_loss(self, rng, observation, actions, *, train=False):
+        """Knowledge insulation's losses, from one backbone pass over [images | prompt | targets] and one action expert
+        pass over the images' and prompt's keys and values through a stop_gradient.
+
+        Returns the flow loss [b, ah], the mean cross-entropy of the target tokens, and the stage head's logits."""
+        observation, x_t, u_t, time = self._flow_inputs(rng, observation, actions, train=train)
+        prefix_tokens, prefix_mask, prefix_ar_mask, n_img_tokens = self.embed_prefix(observation)
+        suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
+        input_mask, attn_mask = ki_masks(prefix_mask, prefix_ar_mask, observation.target_mask)
+        targets = self.PaliGemma.llm(observation.target_tokens, method="embed")
+        (out, _), kv_cache = self.PaliGemma.llm(
+            [jnp.concatenate([prefix_tokens, targets], axis=1), None],
+            mask=attn_mask,
+            positions=jnp.cumsum(input_mask, axis=1) - 1,
+        )
+
+        n_prefix = prefix_tokens.shape[1]
+        last_prompt = n_img_tokens + jnp.sum(observation.tokenized_prompt_mask, axis=1) - 1
+        logits = self.PaliGemma.llm(target_predictors(out, last_prompt, n_prefix), method="deembed")
+        picked = jnp.take_along_axis(logits, observation.target_tokens[..., None], axis=-1)[..., 0]
+        nll = jax.nn.logsumexp(logits, axis=-1) - picked
+        ce = jnp.sum(nll * observation.target_mask) / jnp.maximum(jnp.sum(observation.target_mask), 1)
+
+        prefix_kv = jax.tree.map(lambda x: jax.lax.stop_gradient(x[:, :, :n_prefix]), kv_cache)
+        expert_mask = jnp.concatenate(
+            [
+                einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1]),
+                make_attn_mask(suffix_mask, suffix_ar_mask),
+            ],
+            axis=-1,
+        )
+        (_, suffix_out), _ = self.PaliGemma.llm(
+            [None, suffix_tokens],
+            mask=expert_mask,
+            positions=jnp.sum(prefix_mask, axis=-1)[:, None] + jnp.cumsum(suffix_mask, axis=-1) - 1,
+            kv_cache=prefix_kv,
+            adarms_cond=[None, adarms_cond],
+        )
+        v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
+        flow = jnp.mean(jnp.square(v_t - u_t), axis=-1)
+        return flow, ce, self._stage_logits_from_prefix(out[:, :n_prefix], prefix_mask, n_img_tokens)
 
     def _sample_actions_impl(
         self,

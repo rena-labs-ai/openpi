@@ -7,11 +7,13 @@ chunk, or one per step (action_norm "per_timestep"). Quantiles are exact.
 """
 
 import pathlib
+import tempfile
 
 import numpy as np
 import pandas as pd
 import tyro
 
+import openpi.models.pi0_config as pi0_config
 import openpi.policies.rena_policy as rena_policy
 import openpi.shared.normalize as normalize
 import openpi.training.config as _config
@@ -44,7 +46,8 @@ def stats(x: np.ndarray, axis) -> normalize.NormStats:
 def main(config_name: str, out_dir: pathlib.Path | None = None) -> None:
     config = _config.get_config(config_name)
     factory = config.data
-    data_config = factory.create(config.assets_dirs, config.model)
+    assets_without_stats = pathlib.Path(tempfile.mkdtemp())
+    data_config = factory.create(assets_without_stats, config.model)
     root = factory.dataset_dir
     files = sorted((root / "data").rglob("episode_*.parquet"))
     keep = set(data_config.episodes) if data_config.episodes is not None else None
@@ -63,6 +66,8 @@ def main(config_name: str, out_dir: pathlib.Path | None = None) -> None:
         "state": stats(state, 0),
         "actions": stats(action, 0) if per_step else stats(action.reshape(-1, action.shape[-1]), 0),
     }
+    if isinstance(config.model, pi0_config.Pi0Config) and config.model.knowledge_insulation:
+        norm["fast_actions"] = stats(action.reshape(-1, action.shape[-1]), 0)
     out = out_dir or config.assets_dirs / data_config.asset_id
     normalize.save(out, norm)
     print(f"{len(states)} episodes, {len(state)} frames, actions {action.shape[1:]} ({factory.action_norm}) -> {out}")

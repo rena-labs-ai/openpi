@@ -1,4 +1,7 @@
+import json
+
 import numpy as np
+import pytest
 
 from openpi.policies import rena_policy
 
@@ -45,3 +48,80 @@ def test_outputs_give_the_stage_as_rena_serving_does():
     assert out["actions"].shape == (50, 7)
     assert out["task_stage"] == 1
     np.testing.assert_allclose(out["stage_probs"], [0.1, 0.7, 0.2], rtol=1e-6)
+
+
+def _labels():
+    track = {
+        "image_0": {"frames": [0, 50], "labels": [{"box": [0.25, 0.25, 0.5, 0.5]}, None]},
+        "image_1": {"frames": [0, 50], "labels": [{"box": [0.0, 0.5, 0.5, 1.0]}, {"box": [0.1, 0.1, 0.2, 0.2]}]},
+    }
+    return {
+        "episode_index": 3,
+        "source_key": "renav2_pnp_1:1",
+        "instruction": "pick plush toy and place in box",
+        "fps": 25,
+        "image_sizes": {"image_0": [640, 480], "image_1": [640, 480], "image_2": [480, 640]},
+        "skills": [
+            {"name": "pick", "start": 0, "object": "white plush lamb toy", "track": track, "deploy": track},
+            {
+                "name": "place",
+                "start": 60,
+                "object": "white plush lamb toy",
+                "container": "cardboard box",
+                "track": track,
+                "deploy": track,
+            },
+        ],
+        "argus_labels": {
+            "timeline": [
+                {
+                    "start_s": 0.0,
+                    "end_s": 1.0,
+                    "action": "reach toward",
+                    "object": "white plush lamb toy (left)",
+                    "destination": None,
+                    "spatial_relation": None,
+                },
+                {
+                    "start_s": 2.0,
+                    "end_s": 4.0,
+                    "action": "lower and release",
+                    "object": "white plush lamb toy",
+                    "destination": "cardboard box",
+                    "spatial_relation": "into the",
+                },
+            ]
+        },
+    }
+
+
+def test_annotation_gives_the_skill_its_tracked_boxes_and_the_argus_phase():
+    pytest.importorskip("autolabel_prompts")
+    from autolabel_prompts import loc_box
+
+    rec = _labels()
+    right, wrist = loc_box([0.25, 0.25, 0.5, 0.5], (640, 480), 224), loc_box([0.0, 0.5, 0.5, 1.0], (640, 480), 224)
+    assert rena_policy.annotation(rec, 10, boxes=True) == (
+        f"pick white plush lamb toy at Right: {right} Wrist: {wrist}; reach toward: white plush lamb toy"
+    )
+    assert rena_policy.annotation(rec, 30, boxes=False) == "pick white plush lamb toy"
+    assert rena_policy.annotation(rec, 60, boxes=False) == (
+        "place white plush lamb toy in cardboard box; lower and release: white plush lamb toy, into the cardboard box"
+    )
+    del rec["argus_labels"]
+    assert rena_policy.annotation(rec, 10, boxes=False) == "pick white plush lamb toy"
+
+
+@pytest.mark.parametrize("boxes_in", ["text", "image"])
+def test_annotation_has_boxes_only_when_the_prompt_gives_none(tmp_path, boxes_in):
+    pytest.importorskip("autolabel_prompts")
+    labels = tmp_path / "autolabel.jsonl"
+    labels.write_text(json.dumps(_labels()) + "\n")
+    prompter = rena_policy.AutolabelPrompt(str(labels), boxes_in=boxes_in, annotate=True)
+    given = set()
+    for _ in range(40):
+        out = prompter({"episode_index": 3, "frame_index": 10, "prompt": "task"})
+        has_box = "<loc" in out["prompt"] if boxes_in == "text" else bool(out.get("target_boxes"))
+        assert has_box != ("<loc" in out["annotation"])
+        given.add(has_box)
+    assert given == {True, False}

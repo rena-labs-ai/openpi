@@ -1,6 +1,8 @@
 import dataclasses
+import re
 from typing import Protocol, runtime_checkable
 
+import jax
 import jax.numpy as jnp
 import optax
 
@@ -62,6 +64,32 @@ class OptimizerConfig(Protocol):
     ) -> optax.GradientTransformation: ...
 
 
+_EXPERT = re.compile(
+    r"PaliGemma/llm/.*_1(/|$)|^(action_in_proj|action_out_proj|time_mlp_in|time_mlp_out|state_proj|"
+    r"action_time_mlp_in|action_time_mlp_out)/"
+)
+
+
+def module_labels(params: at.PyTree) -> at.PyTree:
+    """Each parameter's module: "expert" for the action expert, "backbone" for the rest (the VLM and stage head)."""
+
+    def label(path, _):
+        name = "/".join(str(getattr(k, "key", getattr(k, "name", k))) for k in path)
+        return "expert" if _EXPERT.search(name) else "backbone"
+
+    return jax.tree_util.tree_map_with_path(label, params)
+
+
+def module_norms(grads: at.PyTree) -> dict[str, jax.Array]:
+    """The global norm of each module's gradients."""
+    labels = jax.tree.leaves(module_labels(grads))
+    leaves = jax.tree.leaves(grads)
+    return {
+        f"grad_norm_{m}": optax.global_norm([g for g, label in zip(leaves, labels, strict=True) if label == m])
+        for m in ("backbone", "expert")
+    }
+
+
 @dataclasses.dataclass(frozen=True)
 class AdamW(OptimizerConfig):
     """AdamW optimizer."""
@@ -72,6 +100,8 @@ class AdamW(OptimizerConfig):
     # Changing this to 0 can cause out-of-memory errors for some reason, so we set it to a negligible value.
     weight_decay: float = 1e-10
     clip_gradient_norm: float = 1.0
+    # Clip the backbone and the action expert each on its own gradient norm (module_labels).
+    clip_per_module: bool = False
 
     def create(
         self,
@@ -81,8 +111,10 @@ class AdamW(OptimizerConfig):
         tx = optax.adamw(
             lr, b1=self.b1, b2=self.b2, eps=self.eps, weight_decay=self.weight_decay, mask=weight_decay_mask
         )
-
-        return optax.chain(optax.clip_by_global_norm(self.clip_gradient_norm), tx)
+        clip = optax.clip_by_global_norm(self.clip_gradient_norm)
+        if self.clip_per_module:
+            clip = optax.multi_transform({"backbone": clip, "expert": clip}, module_labels)
+        return optax.chain(clip, tx)
 
 
 @dataclasses.dataclass(frozen=True)

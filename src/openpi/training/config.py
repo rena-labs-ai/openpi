@@ -143,6 +143,11 @@ class ModelTransformFactory(GroupFactory):
                             _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
                             discrete_state_input=model_config.discrete_state_input,
                         ),
+                        *(
+                            [_transforms.TokenizeKITargets(_tokenizer.KITargetTokenizer(model_config.max_target_len))]
+                            if model_config.knowledge_insulation
+                            else []
+                        ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
                     ],
                 )
@@ -406,6 +411,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             kept = split["train"] | split["holdout"] if episodes is None else episodes
             episodes = kept - rena_stepped.stepped_episodes(self.dataset_dir)
         command = self.anchor == "command"
+        ki = isinstance(model_config, pi0_config.Pi0Config) and model_config.knowledge_insulation
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -426,24 +432,34 @@ class LeRobotRenaDataConfig(DataConfigFactory):
                     str(labels),
                     state_dropout=self.state_dropout,
                     boxes_in=self.boxes_in,
+                    annotate=ki,
                 ),
                 *([rena_policy.SplitPrevAction()] if command else []),
             ]
-        )
-        delta_action_mask = _transforms.make_bool_mask(6, -1)
-        data_transforms = _transforms.Group(
-            inputs=[
-                *([rena_policy.AnchorOnCommand()] if command else []),
-                rena_policy.RenaInputs(),
-                _transforms.DeltaActions(delta_action_mask),
-            ],
-            outputs=[_transforms.AbsoluteActions(delta_action_mask), rena_policy.RenaOutputs()],
         )
         base = self.create_base_config(assets_dirs, model_config)
         if base.norm_stats is not None and (base.norm_stats["actions"].q01.ndim == 2) != (
             self.action_norm == "per_timestep"
         ):
             raise ValueError(f"{base.asset_id}'s action norm stats are not {self.action_norm}")
+        fast_stats = None
+        if base.norm_stats is not None:
+            fast_stats = base.norm_stats.get("fast_actions") if ki else None
+            if ki and fast_stats is None:
+                raise ValueError(f"{base.asset_id}'s norm stats have no fast_actions: rerun compute_rena_norm_stats.py")
+            base = dataclasses.replace(
+                base, norm_stats={k: v for k, v in base.norm_stats.items() if k != "fast_actions"}
+            )
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = _transforms.Group(
+            inputs=[
+                *([rena_policy.AnchorOnCommand()] if command else []),
+                rena_policy.RenaInputs(),
+                _transforms.DeltaActions(delta_action_mask),
+                *([_transforms.FASTActions(fast_stats)] if fast_stats is not None else []),
+            ],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask), rena_policy.RenaOutputs()],
+        )
         return dataclasses.replace(
             base,
             repack_transforms=repack_transform,
@@ -692,6 +708,7 @@ def _rena(
     action_norm: Literal["global", "per_timestep"] = "global",
     repo_id: str = "rena/rena_autolabel_v3",
     drop_stepped: bool = False,
+    knowledge_insulation: bool = False,
     site_holdout: tuple[str, ...] = (),
 ) -> TrainConfig:
     """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
@@ -700,8 +717,12 @@ def _rena(
     return TrainConfig(
         name=name,
         model=pi0_config.Pi0Config(
-            pi05=True, action_horizon=50, num_stage_classes=7, discrete_state_input=state
-        ),  # len(rena_task_grammar.STAGES)
+            pi05=True,
+            action_horizon=50,
+            num_stage_classes=7,  # len(rena_task_grammar.STAGES)
+            discrete_state_input=state,
+            knowledge_insulation=knowledge_insulation,
+        ),
         data=LeRobotRenaDataConfig(
             repo_id=repo_id,
             base_config=DataConfig(prompt_from_task=True),
@@ -713,7 +734,10 @@ def _rena(
             drop_stepped=drop_stepped,
             site_holdout=site_holdout,
         ),
-        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi05_base/params", paligemma_locs=knowledge_insulation
+        ),
+        optimizer=_optimizer.AdamW(clip_per_module=knowledge_insulation),
         stage_loss_weight=0.03,
         holdout_interval=1000 if split == "train" else 0,
         fsdp_devices=4,
@@ -958,9 +982,17 @@ _CONFIGS = [
         for name, kw in (
             ("pi05_rena_ho_boximg_nostepped", {"drop_stepped": True}),
             ("pi05_rena_ho_boximg_interp", {"repo_id": "rena/rena_autolabel_v3_interp"}),
+            (
+                "pi05_rena_ho_ki",
+                {"repo_id": "rena/rena_autolabel_v3_interp", "knowledge_insulation": True},
+            ),
             # v4 (v3 merged with the next labelled batch by merge_rena_datasets.py) without the Toronto office, scored
             # on it apart
             ("pi05_rena_tor_interp", {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO}),
+            (
+                "pi05_rena_tor_ki",
+                {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO, "knowledge_insulation": True},
+            ),
         )
     ),
     #

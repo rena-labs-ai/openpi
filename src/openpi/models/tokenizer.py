@@ -1,3 +1,4 @@
+import functools
 import logging
 import os
 
@@ -140,6 +141,49 @@ class FASTTokenizer:
         if isinstance(tokens, list):
             tokens = np.array(tokens)
         return self._paligemma_tokenizer.vocab_size() - 1 - self._fast_skip_tokens - tokens
+
+
+# PaliGemma's first <loc> token; its 1024 <loc> and 128 <seg> tokens end the vocabulary.
+LOC_TOKENS_START = 256_000
+
+
+def ki_fast_ids(ids: np.ndarray) -> np.ndarray:
+    """FAST ids to PaliGemma ids and back, as knowledge insulation places them: just below the <loc> tokens, which box
+    targets use."""
+    return LOC_TOKENS_START - 1 - np.asarray(ids)
+
+
+class KITargetTokenizer:
+    """Knowledge insulation's targets for the backbone after the prompt: the annotation text ending in a newline, where
+    annotation decoding stops, then the action chunk's tokens from the universal FAST tokenizer, mapped to PaliGemma
+    ids just below <loc0000>, and the end of sequence."""
+
+    def __init__(self, max_len: int, fast_tokenizer_path: str = "physical-intelligence/fast"):
+        self._max_len = max_len
+        path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
+        with path.open("rb") as f:
+            self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+        self._fast_tokenizer_path = fast_tokenizer_path
+        self.end_of_annotation = self._tokenizer.piece_to_id("\n")
+
+    @functools.cached_property
+    def _fast_tokenizer(self):
+        return AutoProcessor.from_pretrained(self._fast_tokenizer_path, trust_remote_code=True)
+
+    def tokenize(self, annotation: str | None, actions: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
+        """Target tokens [max_len] and their mask."""
+        tokens = [] if annotation is None else [*self._tokenizer.encode(annotation), self.end_of_annotation]
+        if actions is not None:
+            tokens += [*self.fast_ids(actions).tolist(), self._tokenizer.eos_id()]
+        if len(tokens) > self._max_len:
+            logging.warning(f"Target length ({len(tokens)}) exceeds max_target_len ({self._max_len}), truncating.")
+            tokens = tokens[: self._max_len]
+        pad = self._max_len - len(tokens)
+        return np.asarray(tokens + [0] * pad), np.arange(self._max_len) < len(tokens)
+
+    def fast_ids(self, actions: np.ndarray) -> np.ndarray:
+        """An action chunk [horizon, dim] as PaliGemma ids."""
+        return ki_fast_ids(self._fast_tokenizer(actions[None])[0])
 
 
 ###########################################################################

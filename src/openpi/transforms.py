@@ -182,6 +182,20 @@ class Unnormalize(DataTransformFn):
 
 
 @dataclasses.dataclass(frozen=True)
+class FASTActions(DataTransformFn):
+    """The actions quantile-normalised with stats over every step of a chunk, as fast_actions for the FAST target.
+    Runs before Normalize."""
+
+    norm_stats: NormStats
+
+    def __call__(self, data: DataDict) -> DataDict:
+        if "actions" not in data:
+            return data
+        q01, q99 = self.norm_stats.q01, self.norm_stats.q99
+        return {**data, "fast_actions": (data["actions"] - q01) / (q99 - q01 + 1e-6) * 2.0 - 1.0}
+
+
+@dataclasses.dataclass(frozen=True)
 class ResizeImages(DataTransformFn):
     height: int
     width: int
@@ -266,6 +280,23 @@ class TokenizePrompt(DataTransformFn):
 
         tokens, token_masks = self.tokenizer.tokenize(prompt, state, drop_state=drop_state)
         return {**data, "tokenized_prompt": tokens, "tokenized_prompt_mask": token_masks}
+
+
+@dataclasses.dataclass(frozen=True)
+class TokenizeKITargets(DataTransformFn):
+    """Knowledge insulation's target tokens from the sample's annotation and fast_actions, where it has them: training
+    samples do, and inference requests never."""
+
+    tokenizer: _tokenizer.KITargetTokenizer
+
+    def __call__(self, data: DataDict) -> DataDict:
+        annotation, actions = data.pop("annotation", None), data.pop("fast_actions", None)
+        if annotation is None and actions is None:
+            return data
+        if annotation is not None and not isinstance(annotation, str):
+            annotation = annotation.item()
+        tokens, mask = self.tokenizer.tokenize(annotation, actions)
+        return {**data, "target_tokens": tokens, "target_mask": mask}
 
 
 @dataclasses.dataclass(frozen=True)
