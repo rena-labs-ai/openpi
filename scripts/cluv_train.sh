@@ -20,6 +20,8 @@ export XLA_PYTHON_CLIENT_MEM_FRACTION=0.9 PYTHONUNBUFFERED=1
 module load ffmpeg 2>/dev/null || true # the video decoder's libraries, on the DRAC clusters
 py=(uv run --no-sync python)
 
+# Some Fir nodes have GPUs that CUDA cannot open (2026-11-23): stop within a minute, so the next chunk resumes elsewhere.
+"${py[@]}" -c "import jax; jax.devices('gpu')" || { echo "CUDA cannot open the GPUs on $(hostname -s)"; exit 1; }
 "${py[@]}" scripts/compute_rena_norm_stats.py --config-name "$config"
 resume=()
 if ls "$ckpt/$config/$exp" 2>/dev/null | grep -qE '^[0-9]+$'; then
