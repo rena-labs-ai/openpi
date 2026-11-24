@@ -25,3 +25,15 @@ def test_fast_tokenizer():
 
     act = tokenizer.extract_actions(tokens, 3, 2)
     assert act.shape == (3, 2)
+
+
+def test_tokenize_drop_state_keeps_the_pi05_format_without_the_state():
+    tokenizer = _tokenizer.PaligemmaTokenizer(max_len=64)
+    state = np.zeros(7)
+    with_state, _ = tokenizer.tokenize("pick toy", state)
+    without, mask = tokenizer.tokenize("pick toy", state, drop_state=True)
+    sentencepiece = tokenizer._tokenizer  # noqa: SLF001
+    assert (
+        sentencepiece.decode([int(t) for t, m in zip(without, mask, strict=True) if m]) == "Task: pick toy;\nAction: "
+    )
+    assert "State: 128 128" in sentencepiece.decode([int(t) for t in with_state])

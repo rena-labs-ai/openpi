@@ -4,9 +4,11 @@ import abc
 from collections.abc import Sequence
 import dataclasses
 import difflib
+import json
 import logging
 import pathlib
 from typing import Any, Literal, Protocol, TypeAlias
+import zlib
 
 import etils.epath as epath
 import flax.nnx as nnx
@@ -20,12 +22,14 @@ import openpi.models.tokenizer as _tokenizer
 import openpi.policies.aloha_policy as aloha_policy
 import openpi.policies.droid_policy as droid_policy
 import openpi.policies.libero_policy as libero_policy
+import openpi.policies.rena_policy as rena_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
 import openpi.training.misc.polaris_config as polaris_config
 import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
+import openpi.training.rena_stepped as rena_stepped
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
@@ -93,6 +97,8 @@ class DataConfig:
 
     # If true, will use the LeRobot dataset task to define the prompt.
     prompt_from_task: bool = False
+    # Steps before the frame that each action sequence also carries, for transforms that read earlier actions.
+    action_lookback: int = 0
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -360,6 +366,115 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class LeRobotRenaDataConfig(DataConfigFactory):
+    """A dataset rena-autolabel wrote (autolabel/write_dataset.py): renav2 recordings with their labels in
+    meta/autolabel.jsonl, which give each frame's prompt (rena_policy.AutolabelPrompt). Actions are absolute joint
+    targets in the data and deltas from the chunk's first state for the model, the gripper absolute."""
+
+    # Share of training frames whose prompt leaves the state out.
+    state_dropout: float = 0.0
+    # Where the target boxes reach the policy: as <loc> tokens in the prompt, drawn on the camera images, or nowhere.
+    boxes_in: Literal["text", "image", "none"] = "text"
+    # The episodes to use: all, or rena_split's train, holdout or site part.
+    split: Literal["all", "train", "holdout", "site"] = "all"
+    # Deployments (autolabel.jsonl's dataset) held out whole, as the site split: an office the model never trains in.
+    site_holdout: tuple[str, ...] = ()
+    # What each chunk's joint actions are relative to: the measured joints at its first frame, or the joint targets
+    # commanded the step before (rena_policy.AnchorOnCommand), which carry no tracking lag or sag.
+    anchor: Literal["state", "command"] = "state"
+    # Action norm stats over all steps of a chunk, or one per step, as scripts/compute_rena_norm_stats.py writes them.
+    action_norm: Literal["global", "per_timestep"] = "global"
+    # Leave the recordings whose joint commands step (rena_stepped) out of training; the holdout keeps them.
+    drop_stepped: bool = False
+    action_sequence_keys: Sequence[str] = ("action",)
+
+    @property
+    def dataset_dir(self) -> pathlib.Path:
+        """Where the dataset is read from: base_config's root when it sets one, else LeRobot's cache."""
+        from lerobot.common.constants import HF_LEROBOT_HOME
+
+        root = self.base_config.root if self.base_config else None
+        return pathlib.Path(root) if root else HF_LEROBOT_HOME / self.repo_id
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        labels = self.dataset_dir / "meta/autolabel.jsonl"
+        # A serving host builds this config without the dataset; training without the labels fails at its first prompt.
+        split = rena_split(labels, self.site_holdout) if labels.exists() else None
+        episodes = None if split is None or self.split == "all" else split[self.split]
+        if split is not None and self.drop_stepped and self.split == "train":
+            kept = split["train"] | split["holdout"] if episodes is None else episodes
+            episodes = kept - rena_stepped.stepped_episodes(self.dataset_dir)
+        command = self.anchor == "command"
+        repack_transform = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(
+                    {
+                        **{
+                            f"observation.images.{cam}": f"observation.images.{cam}"
+                            for cam in rena_policy.CAMERAS.values()
+                        },
+                        "observation.state": "observation.state",
+                        "actions": "action",
+                        "prompt": "prompt",
+                        "task_stage": "observation.task_stage",
+                        "episode_index": "episode_index",
+                        "frame_index": "frame_index",
+                    }
+                ),
+                rena_policy.AutolabelPrompt(
+                    str(labels),
+                    state_dropout=self.state_dropout,
+                    boxes_in=self.boxes_in,
+                ),
+                *([rena_policy.SplitPrevAction()] if command else []),
+            ]
+        )
+        delta_action_mask = _transforms.make_bool_mask(6, -1)
+        data_transforms = _transforms.Group(
+            inputs=[
+                *([rena_policy.AnchorOnCommand()] if command else []),
+                rena_policy.RenaInputs(),
+                _transforms.DeltaActions(delta_action_mask),
+            ],
+            outputs=[_transforms.AbsoluteActions(delta_action_mask), rena_policy.RenaOutputs()],
+        )
+        base = self.create_base_config(assets_dirs, model_config)
+        if base.norm_stats is not None and (base.norm_stats["actions"].q01.ndim == 2) != (
+            self.action_norm == "per_timestep"
+        ):
+            raise ValueError(f"{base.asset_id}'s action norm stats are not {self.action_norm}")
+        return dataclasses.replace(
+            base,
+            repack_transforms=repack_transform,
+            data_transforms=data_transforms,
+            model_transforms=ModelTransformFactory()(model_config),
+            action_sequence_keys=self.action_sequence_keys,
+            episodes=None if episodes is None else sorted(episodes),
+            action_lookback=1 if command else 0,
+        )
+
+
+# The Toronto office's robots, rena_06 and rena_08 (rena-dev/robots.yaml).
+TORONTO = ("deployment/01KSMZ6GX7YB9T9TBA54R7GD2C", "deployment/01KW2PT72APBHHTCN8KT3FWR8T")
+
+
+def rena_split(labels_path: pathlib.Path | str, site: Sequence[str] = ()) -> dict[str, set[int]]:
+    """rena-autolabel's episodes split by recording: the site's deployments whole, then about one in twenty of the rest
+    held out, chosen by a hash of the recording's source key, so a recording stays on its side when the dataset is
+    rewritten with others."""
+    split = {"train": set(), "holdout": set(), "site": set()}
+    for line in pathlib.Path(labels_path).read_text().splitlines():
+        rec = json.loads(line)
+        if rec["dataset"] in site:
+            part = "site"
+        else:
+            part = "holdout" if zlib.crc32(rec["source_key"].encode()) % 20 == 0 else "train"
+        split[part].add(rec["episode_index"])
+    return split
+
+
+@dataclasses.dataclass(frozen=True)
 class RLDSDroidDataConfig(DataConfigFactory):
     """
     Config for training on DROID, using RLDS data format (for efficient training on larger datasets).
@@ -492,6 +607,9 @@ class TrainConfig:
     lr_schedule: _optimizer.LRScheduleConfig = dataclasses.field(default_factory=_optimizer.CosineDecaySchedule)
     optimizer: _optimizer.OptimizerConfig = dataclasses.field(default_factory=_optimizer.AdamW)
     ema_decay: float | None = 0.99
+    # Weight of the stage head's cross-entropy (pi0.Pi0.compute_loss_and_stage) added to the flow loss; 0 trains
+    # without it, and with it every batch needs observation task_stage.
+    stage_loss_weight: float = 0.0
 
     # Specifies which weights should be frozen.
     freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
@@ -520,6 +638,10 @@ class TrainConfig:
     save_interval: int = 1000
     # If set, any existing checkpoints matching step % keep_period == 0 will not be deleted.
     keep_period: int | None = 5000
+    # Steps between scores on the data config's holdout (training.holdout), with the weights a checkpoint would save;
+    # 0 for none. The holdout is at most holdout_frames frames, spread evenly over it.
+    holdout_interval: int = 0
+    holdout_frames: int = 512
 
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
@@ -558,6 +680,45 @@ class TrainConfig:
     def __post_init__(self) -> None:
         if self.resume and self.overwrite:
             raise ValueError("Cannot resume and overwrite at the same time.")
+
+
+def _rena(
+    name: str,
+    *,
+    state: bool,
+    boxes_in: Literal["text", "image", "none"] = "text",
+    split: Literal["all", "train", "holdout"] = "all",
+    anchor: Literal["state", "command"] = "state",
+    action_norm: Literal["global", "per_timestep"] = "global",
+    repo_id: str = "rena/rena_autolabel_v3",
+    drop_stepped: bool = False,
+    site_holdout: tuple[str, ...] = (),
+) -> TrainConfig:
+    """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
+    stage head as rena-training trains it. With state, the state is in the prompt, left out of a fifth of training
+    prompts; without, the model never sees it. Serving builds each model from the config it trained with."""
+    return TrainConfig(
+        name=name,
+        model=pi0_config.Pi0Config(
+            pi05=True, action_horizon=50, num_stage_classes=7, discrete_state_input=state
+        ),  # len(rena_task_grammar.STAGES)
+        data=LeRobotRenaDataConfig(
+            repo_id=repo_id,
+            base_config=DataConfig(prompt_from_task=True),
+            state_dropout=0.2 if state else 0.0,
+            boxes_in=boxes_in,
+            split=split,
+            anchor=anchor,
+            action_norm=action_norm,
+            drop_stepped=drop_stepped,
+            site_holdout=site_holdout,
+        ),
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        stage_loss_weight=0.03,
+        holdout_interval=1000 if split == "train" else 0,
+        fsdp_devices=4,
+        num_workers=8,
+    )
 
 
 # Use `get_config` if you need to get a config by name in your code.
@@ -764,6 +925,43 @@ _CONFIGS = [
         weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
         pytorch_weight_path="/path/to/your/pytorch_weight_path",
         num_train_steps=30_000,
+    ),
+    #
+    # Rena configs.
+    #
+    _rena("pi05_rena_full", state=True),
+    _rena("pi05_rena_nostate", state=False),
+    _rena("pi05_rena_boximg_nostate", state=False, boxes_in="image"),
+    # Without rena_split's holdout, which scripts/eval_rena_holdout.py scores them on, with per-step action norm
+    # stats: no target boxes or boxes drawn on the images, actions relative to the last command; then the boxes run
+    # with the state in the prompt, and with actions relative to the measured joints instead.
+    *(
+        _rena(
+            name,
+            state=state,
+            boxes_in=boxes_in,
+            split="train",
+            anchor=anchor,
+            action_norm="per_timestep",
+        )
+        for name, boxes_in, state, anchor in (
+            ("pi05_rena_ho_nobox", "none", False, "command"),
+            ("pi05_rena_ho_boximg", "image", False, "command"),
+            ("pi05_rena_ho_boximg_state", "image", True, "command"),
+            ("pi05_rena_ho_boximg_anchorstate", "image", False, "state"),
+        )
+    ),
+    # pi05_rena_ho_boximg without the recordings whose joint commands step, or with them interpolated
+    # (scripts/write_rena_interp_dataset.py writes rena_autolabel_v3_interp).
+    *(
+        _rena(name, state=False, boxes_in="image", split="train", anchor="command", action_norm="per_timestep", **kw)
+        for name, kw in (
+            ("pi05_rena_ho_boximg_nostepped", {"drop_stepped": True}),
+            ("pi05_rena_ho_boximg_interp", {"repo_id": "rena/rena_autolabel_v3_interp"}),
+            # v4 (v3 merged with the next labelled batch by merge_rena_datasets.py) without the Toronto office, scored
+            # on it apart
+            ("pi05_rena_tor_interp", {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO}),
+        )
     ),
     #
     # Fine-tuning Aloha configs.

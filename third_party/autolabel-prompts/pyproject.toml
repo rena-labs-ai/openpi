@@ -1,0 +1,10 @@
+[project]
+name = "autolabel-prompts"
+version = "0.1.0"
+description = "Training prompts sampled from rena-autolabel's labels; numpy and the task grammar only, so rena-training can install it"
+requires-python = ">=3.10"
+dependencies = ["numpy", "rena-task-grammar"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

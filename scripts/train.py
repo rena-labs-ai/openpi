@@ -2,6 +2,7 @@ import dataclasses
 import functools
 import logging
 import platform
+import time
 from typing import Any
 
 import etils.epath as epath
@@ -17,11 +18,13 @@ import tqdm_loggable.auto as tqdm
 import wandb
 
 import openpi.models.model as _model
+import openpi.models.pi0 as _pi0
 import openpi.shared.array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.checkpoints as _checkpoints
 import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
+import openpi.training.holdout as _holdout
 import openpi.training.optimizer as _optimizer
 import openpi.training.sharding as sharding
 import openpi.training.utils as training_utils
@@ -147,15 +150,23 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-        return jnp.mean(chunked_loss)
+        if not config.stage_loss_weight:
+            chunked_loss = model.compute_loss(rng, observation, actions, train=True)
+            return jnp.mean(chunked_loss), flow_by_step(chunked_loss)
+        chunked_loss, stage_logits = model.compute_loss_and_stage(rng, observation, actions, train=True)
+        flow = jnp.mean(chunked_loss)
+        ce, acc = _pi0.stage_ce_and_acc(stage_logits, observation.task_stage)
+        aux = {"flow_loss": flow, "stage_loss": ce, "stage_acc": acc, **flow_by_step(chunked_loss)}
+        return flow + config.stage_loss_weight * ce, aux
 
     train_rng = jax.random.fold_in(rng, state.step)
     observation, actions = batch
 
     # Filter out frozen params.
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    loss, grads = nnx.value_and_grad(loss_fn, argnums=diff_state)(model, train_rng, observation, actions)
+    (loss, aux), grads = nnx.value_and_grad(loss_fn, argnums=diff_state, has_aux=True)(
+        model, train_rng, observation, actions
+    )
 
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
@@ -187,8 +198,58 @@ def train_step(
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
         "param_norm": optax.global_norm(kernel_params),
+        **aux,
     }
     return new_state, info
+
+
+def flow_by_step(chunked_loss: at.Array) -> dict[str, at.Array]:
+    """The flow loss [b, horizon] over the steps a robot executes and over the rest of the chunk; nothing for a loss
+    that is one value per sample, as FAST models give."""
+    if chunked_loss.ndim != 2:
+        return {}
+    return {
+        "flow_loss_executed": jnp.mean(chunked_loss[:, : _holdout.EXECUTED]),
+        "flow_loss_rest": jnp.mean(chunked_loss[:, _holdout.EXECUTED :]),
+    }
+
+
+def holdout_step(state: training_utils.TrainState, batch: dict, rng: at.KeyArrayLike) -> tuple[at.Array, at.Array]:
+    """The weights a checkpoint saves (the EMA when there is one) on a holdout batch: the flow loss [b, horizon] and
+    sampled actions [b, horizon, dim]."""
+    model = nnx.merge(state.model_def, state.params if state.ema_params is None else state.ema_params)
+    model.eval()
+    observation = _model.Observation.from_dict(batch)
+    loss_rng, sample_rng = jax.random.split(rng)
+    flow = model.compute_loss(loss_rng, observation, batch["actions"], train=False)
+    return flow, model.sample_actions(sample_rng, observation, num_steps=10)
+
+
+def holdout_scores(
+    holdout: _holdout.Holdout, pholdout_step, state: training_utils.TrainState, data_sharding, mesh, prefix: str
+) -> dict[str, float]:
+    """The holdout's flow loss and sampled-action errors, with the same noise and flow times every time."""
+    rngs = jax.random.split(jax.random.key(0), len(holdout.batches))
+    flows, predicted = [], []
+    for r, b in zip(rngs, holdout.batches, strict=True):
+        with sharding.set_mesh(mesh):
+            flow, actions = pholdout_step(state, jax.device_put(b, data_sharding), r)
+        flows.append(np.asarray(flow))
+        predicted.append(np.asarray(actions))
+    flow = np.concatenate(flows)
+    report = holdout.report(holdout.errors(predicted))
+    scores = {
+        f"{prefix}/flow_loss": float(flow.mean()),
+        f"{prefix}/flow_loss_executed": float(flow[:, : _holdout.EXECUTED].mean()),
+        f"{prefix}/flow_loss_rest": float(flow[:, _holdout.EXECUTED :].mean()),
+    }
+    for group, summary in {"all": report["all"], **report["by_prompt"]}.items():
+        suffix = "" if group == "all" else f"_{group}"
+        scores[f"{prefix}/joint_mae_executed{suffix}"] = summary["joint_mae_executed"]
+    scores[f"{prefix}/joint_mae_chunk"] = report["all"]["joint_mae_chunk"]
+    scores[f"{prefix}/joint_mae_first_step"] = report["all"]["joint_mae_by_step"][0]
+    scores[f"{prefix}/gripper_mae_executed"] = report["all"]["gripper_mae_executed"]
+    return scores
 
 
 def main(config: _config.TrainConfig):
@@ -257,6 +318,24 @@ def main(config: _config.TrainConfig):
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
+    holdouts = {}
+    if config.holdout_interval:
+        splits = ("holdout", "site") if getattr(config.data, "site_holdout", ()) else ("holdout",)
+        for split in splits:
+            holdout = _holdout.load(
+                config,
+                data_loader.data_config().norm_stats,
+                batch_size=config.batch_size,
+                max_frames=config.holdout_frames,
+                split=split,
+            )
+            if holdout is None:
+                logging.warning(f"{split}: fewer frames than one batch of {config.batch_size}, not scored")
+                continue
+            holdouts[split] = holdout
+            logging.info(f"{split}: {len(holdout.want)} frames, scored every {config.holdout_interval} steps")
+        pholdout_step = jax.jit(holdout_step)
+    lr_schedule = config.lr_schedule.create()
 
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
@@ -267,6 +346,7 @@ def main(config: _config.TrainConfig):
     )
 
     infos = []
+    data_wait, interval_start = 0.0, time.monotonic()
     for step in pbar:
         with sharding.set_mesh(mesh):
             train_state, info = ptrain_step(train_rng, train_state, batch)
@@ -274,11 +354,28 @@ def main(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
+            now = time.monotonic()
+            reduced_info |= {
+                "lr": float(lr_schedule(step)),
+                "time/step_s": (now - interval_start) / len(infos),
+                "time/data_wait_s": data_wait / len(infos),
+            }
+            data_wait, interval_start = 0.0, now
             info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
+        if holdouts and (step % config.holdout_interval == 0 or step == config.num_train_steps - 1):
+            scoring_start = time.monotonic()
+            scores = {}
+            for split, holdout in holdouts.items():
+                scores |= holdout_scores(holdout, pholdout_step, train_state, data_sharding, mesh, split)
+            pbar.write(f"Step {step}: " + ", ".join(f"{k}={v:.4f}" for k, v in scores.items()))
+            wandb.log(scores, step=step)
+            interval_start += time.monotonic() - scoring_start  # not training time
+        wait_start = time.monotonic()
         batch = next(data_iter)
+        data_wait += time.monotonic() - wait_start
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)

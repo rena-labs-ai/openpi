@@ -148,18 +148,18 @@ def create_torch_dataset(
     dataset = lerobot_dataset.LeRobotDataset(
         data_config.repo_id,
         delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            key: [t / dataset_meta.fps for t in range(-data_config.action_lookback, action_horizon)]
+            for key in data_config.action_sequence_keys
         },
         tolerance_s=0.17,
         **local_kwargs,
     )
-
     # Filter to specific episodes using Subset. We avoid LeRobotDataset's episodes
     # param due to a bug in lerobot 0.1.0 (episode_data_index is dense but
     # __getitem__ indexes by original episode_index).
     if data_config.episodes is not None:
-        episodes_set = set(data_config.episodes)
-        indices = [i for i in range(len(dataset)) if dataset.hf_dataset[i]["episode_index"].item() in episodes_set]
+        frame_episodes = np.asarray(dataset.hf_dataset.with_format("numpy")["episode_index"])
+        indices = np.flatnonzero(np.isin(frame_episodes, list(data_config.episodes))).tolist()
         dataset = torch.utils.data.Subset(dataset, indices)
 
     if data_config.prompt_from_task:
