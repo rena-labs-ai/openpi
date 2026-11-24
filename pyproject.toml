@@ -143,3 +143,5 @@ build-backend = "hatchling.build"
 [tool.pytest.ini_options]
 markers = ["manual: should be run manually."]
 testpaths = ["src", "scripts", "packages"]
+# the rena configs' prompt sampler and task grammar, vendored at pinned commits (deps/, scripts/bump_rena_dep.sh)
+pythonpath = ["third_party/autolabel-prompts/src", "third_party/rena-task-grammar/src"]

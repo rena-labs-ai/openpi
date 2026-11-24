@@ -1,0 +1,23 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # The floor of requires-python, and the newest consumer venv.
+        python: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python }}
+      # Tools stay out of pyproject: a consumer's workspace lock would have to resolve them.
+      - run: uvx ruff@0.17.3 format --check .
+      - run: uvx ruff@0.17.3 check .
+      - run: uv run --locked --with pytest pytest -q tests
