@@ -7,11 +7,13 @@ chunk, or one per step (action_norm "per_timestep"). Quantiles are exact.
 """
 
 import pathlib
+import tempfile
 
 import numpy as np
 import pandas as pd
 import tyro
 
+import openpi.models.pi0_config as pi0_config
 import openpi.policies.rena_policy as rena_policy
 import openpi.shared.normalize as normalize
 import openpi.training.config as _config
@@ -44,7 +46,8 @@ def stats(x: np.ndarray, axis) -> normalize.NormStats:
 def main(config_name: str, out_dir: pathlib.Path | None = None) -> None:
     config = _config.get_config(config_name)
     factory = config.data
-    data_config = factory.create(config.assets_dirs, config.model)
+    # Built without the assets dir: the stats it holds may be the stale ones this script replaces.
+    data_config = factory.create(pathlib.Path(tempfile.mkdtemp()), config.model)
     root = factory.dataset_dir
     files = sorted((root / "data").rglob("episode_*.parquet"))
     keep = set(data_config.episodes) if data_config.episodes is not None else None
@@ -63,7 +66,7 @@ def main(config_name: str, out_dir: pathlib.Path | None = None) -> None:
         "state": stats(state, 0),
         "actions": stats(action, 0) if per_step else stats(action.reshape(-1, action.shape[-1]), 0),
     }
-    if getattr(config.model, "knowledge_insulation", False):
+    if isinstance(config.model, pi0_config.Pi0Config) and config.model.knowledge_insulation:
         # the FAST target's, over every step of a chunk whatever action_norm is (transforms.FASTActions)
         norm["fast_actions"] = stats(action.reshape(-1, action.shape[-1]), 0)
     out = out_dir or config.assets_dirs / data_config.asset_id

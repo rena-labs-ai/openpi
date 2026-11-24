@@ -411,7 +411,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             kept = split["train"] | split["holdout"] if episodes is None else episodes
             episodes = kept - rena_stepped.stepped_episodes(self.dataset_dir)
         command = self.anchor == "command"
-        ki = getattr(model_config, "knowledge_insulation", False)
+        ki = isinstance(model_config, pi0_config.Pi0Config) and model_config.knowledge_insulation
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -443,10 +443,15 @@ class LeRobotRenaDataConfig(DataConfigFactory):
         ):
             raise ValueError(f"{base.asset_id}'s action norm stats are not {self.action_norm}")
         # The FAST target's stats are over every step of a chunk (compute_rena_norm_stats.py writes them as
-        # fast_actions); taken out of the norm stats, so serving's Unnormalize never looks for them.
-        fast_stats = None if base.norm_stats is None else base.norm_stats.pop("fast_actions", None)
-        if ki and base.norm_stats is not None and fast_stats is None:
-            raise ValueError(f"{base.asset_id}'s norm stats have no fast_actions: rerun compute_rena_norm_stats.py")
+        # fast_actions), kept out of the norm stats, so serving's Unnormalize never looks for them.
+        fast_stats = None
+        if base.norm_stats is not None:
+            fast_stats = base.norm_stats.get("fast_actions") if ki else None
+            if ki and fast_stats is None:
+                raise ValueError(f"{base.asset_id}'s norm stats have no fast_actions: rerun compute_rena_norm_stats.py")
+            base = dataclasses.replace(
+                base, norm_stats={k: v for k, v in base.norm_stats.items() if k != "fast_actions"}
+            )
         delta_action_mask = _transforms.make_bool_mask(6, -1)
         data_transforms = _transforms.Group(
             inputs=[
