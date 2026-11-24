@@ -7,6 +7,7 @@ import flax.traverse_util
 import numpy as np
 
 import openpi.models.model as _model
+import openpi.models.tokenizer as _tokenizer
 import openpi.shared.array_typing as at
 import openpi.shared.download as download
 
@@ -16,8 +17,6 @@ logger = logging.getLogger(__name__)
 # PaliGemma pt-224. Google's bucket no longer serves it anonymously, so a machine without it in its openpi cache needs the
 # same file from Hugging Face (google/paligemma-3b-pt-224, paligemma-3b-pt-224.npz) copied to its cached path.
 PALIGEMMA_PARAMS = "gs://vertex-model-garden-paligemma-us/paligemma/pt_224.npz"
-# The vocabulary's 1024 <loc> and 128 <seg> tokens start here.
-PALIGEMMA_LOCS = 256_000
 
 
 @runtime_checkable
@@ -62,11 +61,22 @@ class CheckpointWeightLoader(WeightLoader):
         loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
         if self.paligemma_locs:
             embedder = loaded_params["PaliGemma"]["llm"]["embedder"]
-            path = download.maybe_download(PALIGEMMA_PARAMS, gs={"token": "anon"})
+            try:
+                path = download.maybe_download(PALIGEMMA_PARAMS, gs={"token": "anon"})
+            except Exception as e:
+                raise RuntimeError(
+                    f"{PALIGEMMA_PARAMS} is not in the openpi cache and its bucket refuses anonymous downloads: copy "
+                    "paligemma-3b-pt-224.npz from Hugging Face (google/paligemma-3b-pt-224) to "
+                    f"{download.get_cache_dir() / 'vertex-model-garden-paligemma-us/paligemma/pt_224.npz'}"
+                ) from e
             with path.open("rb") as f:
-                rows = np.load(f, allow_pickle=False)["params/llm/embedder/input_embedding"][PALIGEMMA_LOCS:]
+                rows = np.load(f, allow_pickle=False)["params/llm/embedder/input_embedding"][
+                    _tokenizer.LOC_TOKENS_START :
+                ]
             table = embedder["input_embedding"]
-            embedder["input_embedding"] = np.concatenate([table[:PALIGEMMA_LOCS], rows.astype(table.dtype)])
+            embedder["input_embedding"] = np.concatenate(
+                [table[: _tokenizer.LOC_TOKENS_START], rows.astype(table.dtype)]
+            )
         # Add all missing LoRA + stage-head weights (left at fresh init via the strip in _load_weights_and_validate).
         return _merge_params(loaded_params, params, missing_regex=".*lora.*|.*stage_head.*")
 

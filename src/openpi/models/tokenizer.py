@@ -143,10 +143,14 @@ class FASTTokenizer:
         return self._paligemma_tokenizer.vocab_size() - 1 - self._fast_skip_tokens - tokens
 
 
+# PaliGemma's first <loc> token; its 1024 <loc> and 128 <seg> tokens end the vocabulary.
+LOC_TOKENS_START = 256_000
+
+
 def ki_fast_ids(ids: np.ndarray) -> np.ndarray:
-    """FAST ids to PaliGemma ids and back, as knowledge insulation places them: 253952-255999, just below PaliGemma's
-    1024 <loc> and 128 <seg> tokens (257152 - 1 - 1152 - id), which box targets use."""
-    return 255_999 - np.asarray(ids)
+    """FAST ids to PaliGemma ids and back, as knowledge insulation places them: just below the <loc> tokens, which box
+    targets use."""
+    return LOC_TOKENS_START - 1 - np.asarray(ids)
 
 
 class KITargetTokenizer:
