@@ -33,8 +33,13 @@ def link(src: pathlib.Path, dst: pathlib.Path) -> None:
 
 def column_stats(v: np.ndarray) -> dict:
     v = v.astype(np.float64).reshape(len(v), -1)
-    return {"min": v.min(0).tolist(), "max": v.max(0).tolist(), "mean": v.mean(0).tolist(), "std": v.std(0).tolist(),
-            "count": [len(v)]}
+    return {
+        "min": v.min(0).tolist(),
+        "max": v.max(0).tolist(),
+        "mean": v.mean(0).tolist(),
+        "std": v.std(0).tolist(),
+        "count": [len(v)],
+    }
 
 
 def main(srcs: list[str], dst: str, timelines: pathlib.Path | None = None) -> None:
@@ -103,8 +108,10 @@ def main(srcs: list[str], dst: str, timelines: pathlib.Path | None = None) -> No
         "splits": {"train": f"0:{n_ep}"},
     }
     (out / "meta/info.json").write_text(json.dumps(info, indent=4))
-    print(f"{n_ep} episodes, {n_frames} frames, {len(tasks)} tasks, {sum(r.get('argus_labels') is not None for r in labels)}"
-          f" with argus's timeline -> {out}")
+    print(
+        f"{n_ep} episodes, {n_frames} frames, {len(tasks)} tasks, {sum(r.get('argus_labels') is not None for r in labels)}"
+        f" with argus's timeline -> {out}"
+    )
 
 
 if __name__ == "__main__":

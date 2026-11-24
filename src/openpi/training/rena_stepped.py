@@ -2,6 +2,7 @@
 recording, so each value holds for 1-3 frames and then jumps (renav2 robots recorded since 2026-10-29, as the leader
 reaches the follower over WiFi). The gripper's command is unaffected, and the follower's measured joints stay smooth."""
 
+import itertools
 import pathlib
 
 import numpy as np
@@ -35,7 +36,7 @@ def interpolate(action: np.ndarray) -> np.ndarray:
     than a hold."""
     out = np.array(action, copy=True)
     starts = np.concatenate([[0], np.flatnonzero(_changes(action)) + 1])
-    for a, b in zip(starts[:-1], starts[1:], strict=True):
+    for a, b in itertools.pairwise(starts):
         if 1 < b - a <= MAX_GAP:
             w = (np.arange(b - a) / (b - a))[:, None]
             out[a:b, :6] = (1 - w) * action[a, :6] + w * action[b, :6]
