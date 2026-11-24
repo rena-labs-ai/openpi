@@ -69,6 +69,8 @@ def main(
         s: _holdout.load(config, norm_stats, batch_size=batch_size, max_frames=frames, seed=seed, split=s)
         for s in SPLITS
     }
+    if empty := [s for s, d in data.items() if d is None]:
+        raise SystemExit(f"{', '.join(empty)} has fewer frames than one batch of {batch_size}")
     dims = data["holdout"].want.shape[-1]
     noise = {
         s: [

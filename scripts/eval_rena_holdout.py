@@ -35,6 +35,8 @@ def main(
     asset_id = config.data.create(config.assets_dirs, config.model).asset_id
     norm_stats = _checkpoints.load_norm_stats(checkpoint / "assets", asset_id)
     holdout = _holdout.load(config, norm_stats, batch_size=batch_size, max_frames=max_frames, seed=seed, split=split)
+    if holdout is None:
+        raise SystemExit(f"{split} has fewer frames than one batch of {batch_size}")
     model = config.model.load(_model.restore_params(checkpoint / "params", dtype=jnp.bfloat16))
     sample_actions = nnx_utils.module_jit(model.sample_actions)
     rngs = jax.random.split(jax.random.key(seed), len(holdout.batches))

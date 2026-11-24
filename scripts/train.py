@@ -322,14 +322,18 @@ def main(config: _config.TrainConfig):
     if config.holdout_interval:
         splits = ("holdout", "site") if getattr(config.data, "site_holdout", ()) else ("holdout",)
         for split in splits:
-            holdouts[split] = _holdout.load(
+            holdout = _holdout.load(
                 config,
                 data_loader.data_config().norm_stats,
                 batch_size=config.batch_size,
                 max_frames=config.holdout_frames,
                 split=split,
             )
-            logging.info(f"{split}: {len(holdouts[split].want)} frames, scored every {config.holdout_interval} steps")
+            if holdout is None:
+                logging.warning(f"{split}: fewer frames than one batch of {config.batch_size}, not scored")
+                continue
+            holdouts[split] = holdout
+            logging.info(f"{split}: {len(holdout.want)} frames, scored every {config.holdout_interval} steps")
         pholdout_step = jax.jit(holdout_step)
     lr_schedule = config.lr_schedule.create()
 

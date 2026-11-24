@@ -79,7 +79,7 @@ def load(
     max_frames: int | None = None,
     seed: int = 0,
     split: Literal["train", "holdout", "site"] = "holdout",
-) -> Holdout:
+) -> Holdout | None:
     """Evenly spread frames of the config's holdout (or of its train part), at most max_frames, in whole batches."""
     factory = dataclasses.replace(config.data, split=split)
     data_config = factory.create(config.assets_dirs, config.model)
@@ -108,6 +108,8 @@ def load(
     dataset = _data_loader.create_torch_dataset(data_config, config.model.action_horizon, config.model)
     n = len(dataset) if max_frames is None else min(len(dataset), max_frames)
     n -= n % batch_size
+    if n == 0:  # fewer frames than one batch
+        return None
     picks = np.linspace(0, len(dataset) - 1, n).round().astype(int)
     samples, want, kinds, sources = [], [], [], []
     for i in picks:
