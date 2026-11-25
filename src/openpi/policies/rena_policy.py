@@ -112,31 +112,41 @@ def without_parentheticals(text: str) -> str:
 
 
 def annotation(rec: dict, frame: int, *, boxes: bool, names: dict[str, str] | None = None) -> str:
-    """A frame's annotation for the backbone's language targets, from its rena-autolabel labels: the skill phrased as
-    argus phrases its commands, which pi05_base already predicts better than the task grammar's terse form, with
-    argus's names or the instruction's where `names` gives them (autolabel_prompts.class_names); with boxes, the skill target's box on each camera that sees it from the
-    clean track, as autolabel_prompts writes box prompts; then the phase of argus's timeline the frame is in, where the
-    labels carry the timeline:
+    """A frame's annotation for the backbone's language targets, from its rena-autolabel labels. Located first, as
+    pi0.5 and PaliGemma's detection put it: with boxes, the skill target's box on each camera that sees it from the
+    clean track, as PaliGemma <loc> tokens over the padded square input. Then the skill phrased as argus phrases its
+    commands, which pi05_base already predicts better than the task grammar's terse form, with argus's names or the
+    instruction's where `names` gives them (autolabel_prompts.class_names). Then the phase of argus's timeline the frame
+    is in, where the labels carry the timeline:
 
-        pick up the white plush lamb toy at Right: <loc..>x4 Wrist: <loc..>x4; lower and release: teal plush toy, into the bin
+        Right: <loc..>x4 Wrist: <loc..>x4; pick up the white plush lamb toy; lower and release: teal plush toy, into the bin
     """
+    from autolabel_prompts import CAMS
+    from autolabel_prompts import Mix
     from autolabel_prompts import boxes_at
+    from autolabel_prompts import loc_box
     from autolabel_prompts import skill_at
-    from autolabel_prompts import with_boxes
 
     if (sk := skill_at(rec, frame)) is None:
         return ""
-    obj, container = ((names or {}).get(k, sk.get(k)) for k in ("object", "container"))
-    text = f"pick up the {obj}" if sk["name"] == "pick" else f"place the {obj} in the {container}"
+    parts = []
     if boxes:
-        text = with_boxes(text, {c: b["box"] for c, b in boxes_at(sk, frame, "track").items() if b}, rec["image_sizes"])
+        found = boxes_at(sk, frame, "track")
+        views = [
+            f"{name}: {loc_box(found[c]['box'], rec['image_sizes'][c], Mix.input_px)}"
+            for name, c in CAMS
+            if found.get(c)
+        ]
+        if views:
+            parts.append(" ".join(views))
+    obj, container = ((names or {}).get(k, sk.get(k)) for k in ("object", "container"))
+    parts.append(f"pick up the {obj}" if sk["name"] == "pick" else f"place the {obj} in the {container}")
     t = frame / rec["fps"]
     timeline = (rec.get("argus_labels") or {}).get("timeline") or []
     if row := next((r for r in timeline if r["start_s"] <= t < r["end_s"]), None):
         where = " ".join(x for x in (row.get("spatial_relation"), row.get("destination")) if x)
-        phase = without_parentheticals(f"{row['action']}: {row['object']}" + (f", {where}" if where else ""))
-        text += f"; {phase}"
-    return text
+        parts.append(without_parentheticals(f"{row['action']}: {row['object']}" + (f", {where}" if where else "")))
+    return "; ".join(parts)
 
 
 @dataclasses.dataclass(frozen=True)
