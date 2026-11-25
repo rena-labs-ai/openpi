@@ -29,3 +29,11 @@ def test_mixed_dataset_draws_about_its_share_from_the_vl_data():
     assert len(mixed) == 5000
     assert 0.08 < sum(d[0] == "vl" for d in drawn) / len(drawn) < 0.12
     assert drawn == [mixed[i] for i in range(len(mixed))]  # fixed per index
+
+
+def test_mixed_dataset_draws_its_vl_sources_by_weight():
+    robot = [("robot", i) for i in range(6000)]
+    a, b = [("a", i) for i in range(10)], [("b", i) for i in range(10)]
+    mixed = vl_data.MixedDataset(robot, [a, b], share=0.5, seed=0, weights=[3, 1])
+    drawn = [mixed[i][0] for i in range(len(mixed))]
+    assert 2.5 < drawn.count("a") / drawn.count("b") < 3.5

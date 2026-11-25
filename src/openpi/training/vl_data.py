@@ -55,10 +55,19 @@ class VLInputs(transforms.DataTransformFn):
 
 class MixedDataset(torch.utils.data.Dataset):
     """The robot dataset's indices, each one drawn instead, with probability share, from one of the vision-language
-    datasets (picked uniformly); fixed per index and seed, as the loader's shuffling expects."""
+    datasets (picked by weight, evenly by default); fixed per index and seed, as the loader's shuffling expects."""
 
-    def __init__(self, robot: torch.utils.data.Dataset, vl: list[torch.utils.data.Dataset], share: float, seed: int):
+    def __init__(
+        self,
+        robot: torch.utils.data.Dataset,
+        vl: list[torch.utils.data.Dataset],
+        share: float,
+        seed: int,
+        weights: list[float] | None = None,
+    ):
         self._robot, self._vl, self._share, self._seed = robot, vl, share, seed
+        w = np.ones(len(vl)) if not weights else np.asarray(weights, float)
+        self._p = w / w.sum()
 
     def __len__(self) -> int:
         return len(self._robot)
@@ -66,6 +75,6 @@ class MixedDataset(torch.utils.data.Dataset):
     def __getitem__(self, index: int) -> dict:
         rng = np.random.default_rng((self._seed, index))
         if rng.random() < self._share:
-            source = self._vl[rng.integers(len(self._vl))]
+            source = self._vl[rng.choice(len(self._vl), p=self._p)]
             return source[int(rng.integers(len(source)))]
         return self._robot[index]

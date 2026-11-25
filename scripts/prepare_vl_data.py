@@ -76,7 +76,9 @@ def robopoint(
         ]
         if not points:
             continue
-        name = r["image"].replace("/", "_")
+        name = (
+            pathlib.Path(r["image"].replace("/", "_")).with_suffix(".jpg").name
+        )  # JPEG: RoboPoint's PNGs are 5x larger
         size = save_image(images / r["image"], out, name, max_side)
         samples.append(
             {

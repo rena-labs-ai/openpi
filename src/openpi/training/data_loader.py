@@ -341,6 +341,7 @@ def create_torch_data_loader(
             [vl_dataset(name, data_config, action_horizon) for name in data_config.vl_datasets],
             data_config.vl_share,
             seed,
+            list(data_config.vl_weights),
         )
 
     # Use TorchDataLoader for both frameworks

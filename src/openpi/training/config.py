@@ -103,6 +103,8 @@ class DataConfig:
     # samples drawn from them.
     vl_datasets: Sequence[str] = ()
     vl_share: float = 0.0
+    # Each vision-language dataset's weight within vl_share; even when empty.
+    vl_weights: Sequence[float] = ()
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -397,6 +399,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
     drop_stepped: bool = False
     vl_datasets: Sequence[str] = ()
     vl_share: float = 0.0
+    vl_weights: Sequence[float] = ()
     action_sequence_keys: Sequence[str] = ("action",)
 
     @property
@@ -477,6 +480,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             action_lookback=1 if command else 0,
             vl_datasets=self.vl_datasets,
             vl_share=self.vl_share,
+            vl_weights=self.vl_weights,
         )
 
 
@@ -723,6 +727,7 @@ def _rena(
     site_holdout: tuple[str, ...] = (),
     vl_datasets: tuple[str, ...] = (),
     vl_share: float = 0.0,
+    vl_weights: tuple[float, ...] = (),
 ) -> TrainConfig:
     """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
     stage head as rena-training trains it. With state, the state is in the prompt, left out of a fifth of training
@@ -754,6 +759,7 @@ def _rena(
             site_holdout=site_holdout,
             vl_datasets=vl_datasets,
             vl_share=vl_share,
+            vl_weights=vl_weights,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params", paligemma_locs=targets != "none"
