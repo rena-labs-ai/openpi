@@ -74,6 +74,7 @@ class RenaInputs(transforms.DataTransformFn):
         }
         if "actions" in data:
             inputs["actions"] = np.asarray(data["actions"], dtype=np.float32)
+            inputs["action_loss_mask"] = np.True_
         if "task_stage" in data:
             inputs["task_stage"] = np.asarray(data["task_stage"], dtype=np.int32)
         for key in ("prompt", "drop_state", "annotation"):

@@ -14,6 +14,7 @@ import torch
 import openpi.models.model as _model
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
+import openpi.training.vl_data as _vl_data
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
@@ -208,6 +209,22 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
     )
 
 
+def vl_dataset(name: str, data_config: _config.DataConfig, action_horizon: int) -> Dataset:
+    """A vision-language dataset under HF_LEROBOT_HOME, through the robot data's normalisation and model transforms."""
+    from lerobot.common.constants import HF_LEROBOT_HOME
+
+    norm_stats = data_config.norm_stats or {}
+    state_dim = norm_stats["state"].mean.shape[-1] if "state" in norm_stats else 7
+    return TransformedDataset(
+        _vl_data.VLDataset(HF_LEROBOT_HOME / name),
+        [
+            _vl_data.VLInputs(action_horizon=action_horizon, action_dim=state_dim),
+            _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+            *data_config.model_transforms.inputs,
+        ],
+    )
+
+
 def transform_iterable_dataset(
     dataset: IterableDataset,
     data_config: _config.DataConfig,
@@ -318,6 +335,13 @@ def create_torch_data_loader(
     """
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
+    if data_config.vl_datasets:
+        dataset = _vl_data.MixedDataset(
+            dataset,
+            [vl_dataset(name, data_config, action_horizon) for name in data_config.vl_datasets],
+            data_config.vl_share,
+            seed,
+        )
 
     # Use TorchDataLoader for both frameworks
     # For PyTorch DDP, create DistributedSampler and divide batch size by world size
