@@ -728,6 +728,7 @@ def _rena(
     vl_datasets: tuple[str, ...] = (),
     vl_share: float = 0.0,
     vl_weights: tuple[float, ...] = (),
+    lora: bool = False,
 ) -> TrainConfig:
     """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
     stage head as rena-training trains it. With state, the state is in the prompt, left out of a fifth of training
@@ -735,18 +736,24 @@ def _rena(
 
     targets "ki": the backbone learns annotations and FAST tokens apart from the action expert (knowledge insulation);
     "cotrain": it learns annotations and the vision-language datasets' answers while the flow loss trains it too, at
-    TRI's weight."""
+    TRI's weight.
+
+    lora: the Gemma backbone trains through rank-32 LoRA at ten times the learning rate, the vision encoder, action
+    expert and heads in full."""
+    model = pi0_config.Pi0Config(
+        pi05=True,
+        paligemma_variant="gemma_2b_lora32" if lora else "gemma_2b",
+        action_horizon=50,
+        num_stage_classes=7,  # len(rena_task_grammar.STAGES)
+        discrete_state_input=state,
+        language_targets=targets != "none",
+        insulate=targets == "ki",
+        fast_targets=targets == "ki",
+    )
     return TrainConfig(
         name=name,
-        model=pi0_config.Pi0Config(
-            pi05=True,
-            action_horizon=50,
-            num_stage_classes=7,  # len(rena_task_grammar.STAGES)
-            discrete_state_input=state,
-            language_targets=targets != "none",
-            insulate=targets == "ki",
-            fast_targets=targets == "ki",
-        ),
+        model=model,
+        freeze_filter=model.get_freeze_filter() if lora else nnx.Nothing(),
         data=LeRobotRenaDataConfig(
             repo_id=repo_id,
             base_config=DataConfig(prompt_from_task=True),
@@ -764,7 +771,7 @@ def _rena(
         weight_loader=weight_loaders.CheckpointWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params", paligemma_locs=targets != "none"
         ),
-        optimizer=_optimizer.AdamW(clip_per_module=targets == "ki"),
+        optimizer=_optimizer.AdamW(clip_per_module=targets == "ki", lora_lr_scale=10.0 if lora else 1.0),
         stage_loss_weight=0.03,
         target_loss_weight=0.02 if targets == "cotrain" else 1.0,
         holdout_interval=1000 if split == "train" else 0,
@@ -1035,6 +1042,33 @@ _CONFIGS = [
                 },
             ),
         )
+    ),
+    # pi05_rena_tor_interp and pi05_rena_tor_cotrain with the backbone's language model trained through LoRA
+    _rena(
+        "pi05_rena_tor_lora",
+        state=False,
+        boxes_in="image",
+        split="train",
+        anchor="command",
+        action_norm="per_timestep",
+        repo_id="rena/rena_autolabel_v4_interp",
+        site_holdout=TORONTO,
+        lora=True,
+    ),
+    _rena(
+        "pi05_rena_tor_cotrain_lora",
+        state=False,
+        boxes_in="image",
+        split="train",
+        anchor="command",
+        action_norm="per_timestep",
+        repo_id="rena/rena_autolabel_v4_interp",
+        site_holdout=TORONTO,
+        targets="cotrain",
+        vl_datasets=("vl/refcoco", "vl/robopoint_object", "vl/robopoint_region"),
+        vl_share=0.1,
+        vl_weights=(0.5, 0.25, 0.25),
+        lora=True,
     ),
     #
     # Fine-tuning Aloha configs.
