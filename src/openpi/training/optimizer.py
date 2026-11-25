@@ -70,14 +70,20 @@ _EXPERT = re.compile(
 )
 
 
+def _name(path) -> str:
+    return "/".join(str(getattr(k, "key", getattr(k, "name", k))) for k in path)
+
+
 def module_labels(params: at.PyTree) -> at.PyTree:
     """Each parameter's module: "expert" for the action expert, "backbone" for the rest (the VLM and stage head)."""
+    return jax.tree_util.tree_map_with_path(
+        lambda path, _: "expert" if _EXPERT.search(_name(path)) else "backbone", params
+    )
 
-    def label(path, _):
-        name = "/".join(str(getattr(k, "key", getattr(k, "name", k))) for k in path)
-        return "expert" if _EXPERT.search(name) else "backbone"
 
-    return jax.tree_util.tree_map_with_path(label, params)
+def lora_mask(params: at.PyTree) -> at.PyTree:
+    """True for the LoRA factors."""
+    return jax.tree_util.tree_map_with_path(lambda path, _: "lora" in _name(path), params)
 
 
 def module_norms(grads: at.PyTree) -> dict[str, jax.Array]:
@@ -102,6 +108,8 @@ class AdamW(OptimizerConfig):
     clip_gradient_norm: float = 1.0
     # Clip the backbone and the action expert each on its own gradient norm (module_labels).
     clip_per_module: bool = False
+    # The LoRA factors' learning rate over the schedule's, which the other trainable weights keep.
+    lora_lr_scale: float = 1.0
 
     def create(
         self,
@@ -114,6 +122,8 @@ class AdamW(OptimizerConfig):
         clip = optax.clip_by_global_norm(self.clip_gradient_norm)
         if self.clip_per_module:
             clip = optax.multi_transform({"backbone": clip, "expert": clip}, module_labels)
+        if self.lora_lr_scale != 1.0:
+            tx = optax.chain(tx, optax.masked(optax.scale(self.lora_lr_scale), lora_mask))
         return optax.chain(clip, tx)
 
 

@@ -91,6 +91,24 @@ def test_pi0_gemma_lora():
     assert all("_1" not in p for p in state)
 
 
+def test_pi0_gemma_lora32_freezes_only_the_gemma_backbone():
+    config = _pi0_config.Pi0Config(pi05=True, paligemma_variant="gemma_2b_lora32")
+    state = _get_frozen_state(config)
+    assert state
+    assert all(p[:2] == ("PaliGemma", "llm") for p in state)
+    assert not any("lora" in str(k) or re.search(r"_1$", str(k)) for p in state for k in p)
+
+
+def test_lora_lr_scale_scales_only_the_lora_updates():
+    params = {"q": {"w": jnp.ones(3), "lora_a": jnp.ones(3)}}
+    grads = jax.tree.map(lambda x: 0.5 * x, params)
+    tx, ref = _optimizer.AdamW(lora_lr_scale=10.0).create(1e-3), _optimizer.AdamW().create(1e-3)
+    updates, _ = tx.update(grads, tx.init(params), params)
+    want, _ = ref.update(grads, ref.init(params), params)
+    np.testing.assert_allclose(updates["q"]["w"], want["q"]["w"])
+    np.testing.assert_allclose(updates["q"]["lora_a"], 10 * want["q"]["lora_a"], rtol=1e-6)
+
+
 def test_pi0_action_expert_lora():
     config = _pi0_config.Pi0Config(action_expert_variant="gemma_300m_lora")
     state = _get_frozen_state(config)

@@ -52,7 +52,7 @@ class Config:
     lora_configs: dict[str, lora.LoRAConfig] = dataclasses.field(default_factory=dict)
 
 
-Variant = Literal["dummy", "gemma_300m", "gemma_300m_lora", "gemma_2b", "gemma_2b_lora"]
+Variant = Literal["dummy", "gemma_300m", "gemma_300m_lora", "gemma_2b", "gemma_2b_lora", "gemma_2b_lora32"]
 
 
 def get_config(variant: Variant) -> Config:
@@ -95,6 +95,11 @@ def get_config(variant: Variant) -> Config:
             head_dim=256,
             lora_configs={"attn": lora.LoRAConfig(rank=16, alpha=16.0), "ffn": lora.LoRAConfig(rank=16, alpha=16.0)},
         )
+    if variant == "gemma_2b_lora32":
+        # LoRA as "LoRA Without Regret" (Thinking Machines, 2025) parametrizes it: alpha 32 and B at zero, on attention
+        # and MLP. Its LoRA learning rate is about ten times full fine-tuning's.
+        lora_config = lora.LoRAConfig(rank=32, alpha=32.0, b_init_fn=nn.initializers.zeros)
+        return dataclasses.replace(get_config("gemma_2b"), lora_configs={"attn": lora_config, "ffn": lora_config})
     if variant == "gemma_300m_lora":
         # 311M params
         return Config(
