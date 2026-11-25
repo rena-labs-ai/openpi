@@ -151,10 +151,13 @@ def train_step(
     def loss_fn(
         model: _model.BaseModel, rng: at.KeyArrayLike, observation: _model.Observation, actions: _model.Actions
     ):
-        if isinstance(config.model, _pi0_config.Pi0Config) and config.model.knowledge_insulation:
-            chunked_loss, target_ce, stage_logits = model.compute_ki_loss(rng, observation, actions, train=True)
+        acts = observation.action_loss_mask
+        if isinstance(config.model, _pi0_config.Pi0Config) and config.model.language_targets:
+            chunked_loss, target_ce, stage_logits = model.compute_target_loss(rng, observation, actions, train=True)
+            if acts is not None:  # the flow over the samples with actions to learn
+                chunked_loss = chunked_loss * acts[:, None] * (acts.shape[0] / jnp.maximum(jnp.sum(acts), 1))
             flow = jnp.mean(chunked_loss)
-            loss, aux = target_ce + flow, {"target_ce": target_ce}
+            loss, aux = flow + config.target_loss_weight * target_ce, {"target_ce": target_ce}
         elif config.stage_loss_weight:
             chunked_loss, stage_logits = model.compute_loss_and_stage(rng, observation, actions, train=True)
             loss = flow = jnp.mean(chunked_loss)
@@ -164,7 +167,7 @@ def train_step(
             return jnp.mean(chunked_loss), flow_by_step(chunked_loss)
         aux |= {"flow_loss": flow, **flow_by_step(chunked_loss)}
         if config.stage_loss_weight:
-            ce, acc = _pi0.stage_ce_and_acc(stage_logits, observation.task_stage)
+            ce, acc = _pi0.stage_ce_and_acc(stage_logits, observation.task_stage, acts)
             aux |= {"stage_loss": ce, "stage_acc": acc}
             loss += config.stage_loss_weight * ce
         return loss, aux

@@ -121,6 +121,8 @@ class Observation(Generic[ArrayT]):
     # inference: the annotation and the FAST tokens, and their mask.
     target_tokens: at.Int[ArrayT, "*b t"] | None = None
     target_mask: at.Bool[ArrayT, "*b t"] | None = None
+    # False for a sample without actions to learn (vision-language data): no flow or stage loss; None for all True.
+    action_loss_mask: at.Bool[ArrayT, "*b"] | None = None
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -145,6 +147,7 @@ class Observation(Generic[ArrayT]):
             task_stage=data.get("task_stage"),
             target_tokens=data.get("target_tokens"),
             target_mask=data.get("target_mask"),
+            action_loss_mask=data.get("action_loss_mask"),
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:

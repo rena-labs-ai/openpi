@@ -33,16 +33,19 @@ class Pi0Config(_model.BaseModelConfig):
     discrete_state_input: bool = None  # type: ignore
     # rena sets this from rena_task_grammar.STAGES; 3 is every checkpoint trained before that table.
     num_stage_classes: int = 3
-    # Knowledge insulation (pi05 only): the backbone also trains on cross-entropy over target tokens after the prompt
-    # (an annotation, then the action chunk's FAST tokens), and the action expert sees the images and prompt through a
-    # stop_gradient, so the flow loss leaves the backbone alone (Pi0.compute_ki_loss).
-    knowledge_insulation: bool = False
+    # Language targets (pi05 only): the backbone also trains on cross-entropy over target tokens after the prompt, an
+    # annotation and, with fast_targets, the action chunk's FAST tokens (Pi0.compute_target_loss).
+    language_targets: bool = False
+    # The action expert reads the backbone through a stop_gradient, so the flow loss leaves the backbone alone:
+    # knowledge insulation. Off, the flow loss trains the backbone too, as plain co-training does.
+    insulate: bool = True
+    fast_targets: bool = True
     # Length the target tokens are padded to (tokenizer.KITargetTokenizer).
     max_target_len: int = 128
 
     def __post_init__(self):
-        if self.knowledge_insulation and not self.pi05:
-            raise ValueError("knowledge_insulation needs pi05")
+        if self.language_targets and not self.pi05:
+            raise ValueError("language_targets needs pi05")
         if self.max_token_len is None:
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:

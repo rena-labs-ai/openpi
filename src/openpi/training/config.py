@@ -99,6 +99,10 @@ class DataConfig:
     prompt_from_task: bool = False
     # Steps before the frame that each action sequence also carries, for transforms that read earlier actions.
     action_lookback: int = 0
+    # Vision-language datasets (training.vl_data, under HF_LEROBOT_HOME) mixed into training, and the share of
+    # samples drawn from them.
+    vl_datasets: Sequence[str] = ()
+    vl_share: float = 0.0
 
     # Only used for RLDS data loader (ie currently only used for DROID).
     rlds_data_dir: str | None = None
@@ -145,7 +149,7 @@ class ModelTransformFactory(GroupFactory):
                         ),
                         *(
                             [_transforms.TokenizeKITargets(_tokenizer.KITargetTokenizer(model_config.max_target_len))]
-                            if model_config.knowledge_insulation
+                            if model_config.language_targets
                             else []
                         ),
                         _transforms.PadStatesAndActions(model_config.action_dim),
@@ -391,6 +395,8 @@ class LeRobotRenaDataConfig(DataConfigFactory):
     action_norm: Literal["global", "per_timestep"] = "global"
     # Leave the recordings whose joint commands step (rena_stepped) out of training; the holdout keeps them.
     drop_stepped: bool = False
+    vl_datasets: Sequence[str] = ()
+    vl_share: float = 0.0
     action_sequence_keys: Sequence[str] = ("action",)
 
     @property
@@ -411,7 +417,8 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             kept = split["train"] | split["holdout"] if episodes is None else episodes
             episodes = kept - rena_stepped.stepped_episodes(self.dataset_dir)
         command = self.anchor == "command"
-        ki = isinstance(model_config, pi0_config.Pi0Config) and model_config.knowledge_insulation
+        targets = isinstance(model_config, pi0_config.Pi0Config) and model_config.language_targets
+        fast = targets and model_config.fast_targets
         repack_transform = _transforms.Group(
             inputs=[
                 _transforms.RepackTransform(
@@ -432,7 +439,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
                     str(labels),
                     state_dropout=self.state_dropout,
                     boxes_in=self.boxes_in,
-                    annotate=ki,
+                    annotate=targets,
                 ),
                 *([rena_policy.SplitPrevAction()] if command else []),
             ]
@@ -444,8 +451,8 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             raise ValueError(f"{base.asset_id}'s action norm stats are not {self.action_norm}")
         fast_stats = None
         if base.norm_stats is not None:
-            fast_stats = base.norm_stats.get("fast_actions") if ki else None
-            if ki and fast_stats is None:
+            fast_stats = base.norm_stats.get("fast_actions") if fast else None
+            if fast and fast_stats is None:
                 raise ValueError(f"{base.asset_id}'s norm stats have no fast_actions: rerun compute_rena_norm_stats.py")
             base = dataclasses.replace(
                 base, norm_stats={k: v for k, v in base.norm_stats.items() if k != "fast_actions"}
@@ -468,6 +475,8 @@ class LeRobotRenaDataConfig(DataConfigFactory):
             action_sequence_keys=self.action_sequence_keys,
             episodes=None if episodes is None else sorted(episodes),
             action_lookback=1 if command else 0,
+            vl_datasets=self.vl_datasets,
+            vl_share=self.vl_share,
         )
 
 
@@ -626,6 +635,8 @@ class TrainConfig:
     # Weight of the stage head's cross-entropy (pi0.Pi0.compute_loss_and_stage) added to the flow loss; 0 trains
     # without it, and with it every batch needs observation task_stage.
     stage_loss_weight: float = 0.0
+    # Weight of the backbone's cross-entropy on target tokens against the flow loss (Pi0Config.language_targets).
+    target_loss_weight: float = 1.0
 
     # Specifies which weights should be frozen.
     freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
@@ -708,12 +719,18 @@ def _rena(
     action_norm: Literal["global", "per_timestep"] = "global",
     repo_id: str = "rena/rena_autolabel_v3",
     drop_stepped: bool = False,
-    knowledge_insulation: bool = False,
+    targets: Literal["none", "ki", "cotrain"] = "none",
     site_holdout: tuple[str, ...] = (),
+    vl_datasets: tuple[str, ...] = (),
+    vl_share: float = 0.0,
 ) -> TrainConfig:
     """Full fine-tuning of pi0.5 on rena-autolabel's dataset, with openpi's default schedule, batch and EMA, and the
     stage head as rena-training trains it. With state, the state is in the prompt, left out of a fifth of training
-    prompts; without, the model never sees it. Serving builds each model from the config it trained with."""
+    prompts; without, the model never sees it. Serving builds each model from the config it trained with.
+
+    targets "ki": the backbone learns annotations and FAST tokens apart from the action expert (knowledge insulation);
+    "cotrain": it learns annotations and the vision-language datasets' answers while the flow loss trains it too, at
+    TRI's weight."""
     return TrainConfig(
         name=name,
         model=pi0_config.Pi0Config(
@@ -721,7 +738,9 @@ def _rena(
             action_horizon=50,
             num_stage_classes=7,  # len(rena_task_grammar.STAGES)
             discrete_state_input=state,
-            knowledge_insulation=knowledge_insulation,
+            language_targets=targets != "none",
+            insulate=targets == "ki",
+            fast_targets=targets == "ki",
         ),
         data=LeRobotRenaDataConfig(
             repo_id=repo_id,
@@ -733,12 +752,15 @@ def _rena(
             action_norm=action_norm,
             drop_stepped=drop_stepped,
             site_holdout=site_holdout,
+            vl_datasets=vl_datasets,
+            vl_share=vl_share,
         ),
         weight_loader=weight_loaders.CheckpointWeightLoader(
-            "gs://openpi-assets/checkpoints/pi05_base/params", paligemma_locs=knowledge_insulation
+            "gs://openpi-assets/checkpoints/pi05_base/params", paligemma_locs=targets != "none"
         ),
-        optimizer=_optimizer.AdamW(clip_per_module=knowledge_insulation),
+        optimizer=_optimizer.AdamW(clip_per_module=targets == "ki"),
         stage_loss_weight=0.03,
+        target_loss_weight=0.02 if targets == "cotrain" else 1.0,
         holdout_interval=1000 if split == "train" else 0,
         fsdp_devices=4,
         num_workers=8,
@@ -984,14 +1006,25 @@ _CONFIGS = [
             ("pi05_rena_ho_boximg_interp", {"repo_id": "rena/rena_autolabel_v3_interp"}),
             (
                 "pi05_rena_ho_ki",
-                {"repo_id": "rena/rena_autolabel_v3_interp", "knowledge_insulation": True},
+                {"repo_id": "rena/rena_autolabel_v3_interp", "targets": "ki"},
             ),
             # v4 (v3 merged with the next labelled batch by merge_rena_datasets.py) without the Toronto office, scored
             # on it apart
             ("pi05_rena_tor_interp", {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO}),
             (
                 "pi05_rena_tor_ki",
-                {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO, "knowledge_insulation": True},
+                {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO, "targets": "ki"},
+            ),
+            # co-trained as TRI's LBMs are: annotations and vision-language data through a backbone the flow trains too
+            (
+                "pi05_rena_tor_cotrain",
+                {
+                    "repo_id": "rena/rena_autolabel_v4_interp",
+                    "site_holdout": TORONTO,
+                    "targets": "cotrain",
+                    "vl_datasets": ("vl/refcoco", "vl/robopoint_object", "vl/robopoint_region"),
+                    "vl_share": 0.1,
+                },
             ),
         )
     ),

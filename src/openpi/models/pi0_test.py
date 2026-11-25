@@ -138,11 +138,20 @@ def ki():
         pi05=True,
         paligemma_variant="dummy",
         action_expert_variant="dummy",
-        knowledge_insulation=True,
+        language_targets=True,
         max_target_len=6,
         dtype="float32",
     )
     model = config.create(jax.random.key(0))
+    # pi0.5's expert starts out ignoring the prefix, so its flow gradient could not reach the backbone either way
+    leaves, tree = jax.tree.flatten(nnx.state(model, nnx.Param))
+    keys = jax.random.split(jax.random.key(7), len(leaves))
+    nnx.update(
+        model,
+        jax.tree.unflatten(
+            tree, [x + 0.02 * jax.random.normal(k, x.shape, x.dtype) for x, k in zip(leaves, keys, strict=True)]
+        ),
+    )
     rng = np.random.default_rng(0)
     obs = config.fake_obs(2)
     prompt_mask = np.ones((2, config.max_token_len), bool)
@@ -160,16 +169,16 @@ def ki():
 def test_ki_flow_loss_ignores_the_targets_and_trains_only_the_expert(ki):
     config, model, obs = ki
     act = jnp.asarray(np.random.default_rng(1).normal(size=(2, config.action_horizon, config.action_dim)), jnp.float32)
-    flow, ce, stage_logits = model.compute_ki_loss(jax.random.key(1), obs, act)
+    flow, ce, stage_logits = model.compute_target_loss(jax.random.key(1), obs, act)
     other = dataclasses.replace(obs, target_tokens=obs.target_tokens + 7)
-    other_flow, other_ce, _ = model.compute_ki_loss(jax.random.key(1), other, act)
+    other_flow, other_ce, _ = model.compute_target_loss(jax.random.key(1), other, act)
     assert flow.shape == (2, config.action_horizon)
     assert stage_logits.shape == (2, config.num_stage_classes)
     assert jnp.array_equal(flow, other_flow)
     assert ce != other_ce
     np.testing.assert_allclose(flow, model.compute_loss(jax.random.key(1), obs, act), rtol=1e-5, atol=1e-6)
 
-    grads = nnx.grad(lambda m: jnp.mean(m.compute_ki_loss(jax.random.key(1), obs, act)[0]))(model)
+    grads = nnx.grad(lambda m: jnp.mean(m.compute_target_loss(jax.random.key(1), obs, act)[0]))(model)
     flat = {"/".join(map(str, path)): np.abs(np.asarray(g.value)).max() for path, g in grads.flat_state().items()}
     backbone = {p: g for p, g in flat.items() if p.startswith("PaliGemma") and not re.search(r"_1(/|$)", p)}
     expert = {p: g for p, g in flat.items() if re.search(r"_1(/|$)", p)}
@@ -185,11 +194,11 @@ def test_ki_optimizer_splits_modules_by_the_loss_that_trains_them(ki):
     # without the image encoder, whose full-size gradients and optimizer state would not fit a small GPU
     params = nnx.All(nnx.Param, nnx.Not(nnx_utils.PathRegex("PaliGemma/img/.*")))
     flow_grads = nnx.grad(
-        lambda m: jnp.mean(m.compute_ki_loss(jax.random.key(1), obs, act)[0]), argnums=nnx.DiffState(0, params)
+        lambda m: jnp.mean(m.compute_target_loss(jax.random.key(1), obs, act)[0]), argnums=nnx.DiffState(0, params)
     )(model)
-    ce_grads = nnx.grad(lambda m: m.compute_ki_loss(jax.random.key(1), obs, act)[1], argnums=nnx.DiffState(0, params))(
-        model
-    )
+    ce_grads = nnx.grad(
+        lambda m: m.compute_target_loss(jax.random.key(1), obs, act)[1], argnums=nnx.DiffState(0, params)
+    )(model)
     labels = _optimizer.module_labels(nnx.state(model, params))
     for grads, module in ((flow_grads, "expert"), (ce_grads, "backbone")):
         trained = jax.tree.map(lambda g: bool(jnp.any(g != 0)), grads)
@@ -204,3 +213,23 @@ def test_ki_optimizer_splits_modules_by_the_loss_that_trains_them(ki):
     for a, b, label in zip(jax.tree.leaves(expert_only), jax.tree.leaves(mixed), jax.tree.leaves(labels), strict=True):
         if label == "expert":
             np.testing.assert_allclose(a, b, rtol=1e-5, atol=1e-12)
+
+
+def test_without_insulation_the_flow_loss_trains_the_backbone_too(ki):
+    config, model, obs = ki
+    act = jnp.asarray(np.random.default_rng(1).normal(size=(2, config.action_horizon, config.action_dim)), jnp.float32)
+    model.insulate = False
+    try:
+        grads = nnx.grad(lambda m: jnp.mean(m.compute_target_loss(jax.random.key(1), obs, act)[0]))(model)
+    finally:
+        model.insulate = True
+    flat = {"/".join(map(str, path)): np.abs(np.asarray(g.value)).max() for path, g in grads.flat_state().items()}
+    assert any(g > 0 for p, g in flat.items() if p.startswith("PaliGemma/llm") and not re.search(r"_1(/|$)", p))
+
+
+def test_stage_loss_counts_only_the_samples_with_actions():
+    logits = jnp.array([[5.0, 0.0], [0.0, 5.0]])
+    ce, acc = stage_ce_and_acc(logits, jnp.array([0, 0]), jnp.array([True, False]))
+    want_ce, want_acc = stage_ce_and_acc(logits[:1], jnp.array([0]))
+    assert jnp.allclose(ce, want_ce)
+    assert acc == want_acc == 1.0

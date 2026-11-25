@@ -66,7 +66,7 @@ def main(config_name: str, out_dir: pathlib.Path | None = None) -> None:
         "state": stats(state, 0),
         "actions": stats(action, 0) if per_step else stats(action.reshape(-1, action.shape[-1]), 0),
     }
-    if isinstance(config.model, pi0_config.Pi0Config) and config.model.knowledge_insulation:
+    if isinstance(config.model, pi0_config.Pi0Config) and config.model.language_targets and config.model.fast_targets:
         norm["fast_actions"] = stats(action.reshape(-1, action.shape[-1]), 0)
     out = out_dir or config.assets_dirs / data_config.asset_id
     normalize.save(out, norm)

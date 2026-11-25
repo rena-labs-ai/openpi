@@ -90,13 +90,16 @@ def masked_mean_pool(tokens, mask):
     return summed / count
 
 
-def stage_ce_and_acc(logits, labels):
-    """Mean cross-entropy and accuracy of stage logits ``[b, n]`` against int labels ``[b]``."""
+def stage_ce_and_acc(logits, labels, mask=None):
+    """Mean cross-entropy and accuracy of stage logits ``[b, n]`` against int labels ``[b]``, over the samples mask
+    ``[b]`` keeps (all by default)."""
     labels = labels.astype(jnp.int32)
     onehot = jax.nn.one_hot(labels, logits.shape[-1])
     logp = jax.nn.log_softmax(logits, axis=-1)
-    ce = -jnp.mean(jnp.sum(onehot * logp, axis=-1))
-    acc = jnp.mean((jnp.argmax(logits, axis=-1) == labels).astype(jnp.float32))
+    weight = jnp.ones(labels.shape, jnp.float32) if mask is None else mask.astype(jnp.float32)
+    n = jnp.maximum(jnp.sum(weight), 1)
+    ce = -jnp.sum(jnp.sum(onehot * logp, axis=-1) * weight) / n
+    acc = jnp.sum((jnp.argmax(logits, axis=-1) == labels) * weight) / n
     return ce, acc
 
 
@@ -104,6 +107,7 @@ class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
         self.pi05 = config.pi05
+        self.insulate = config.insulate
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         # TODO: rewrite gemma in NNX. For now, use bridge.
@@ -285,9 +289,10 @@ class Pi0(_model.BaseModel):
         stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
         return flow_loss, stage_logits
 
-    def compute_ki_loss(self, rng, observation, actions, *, train=False):
-        """Knowledge insulation's losses, from one backbone pass over [images | prompt | targets] and one action expert
-        pass over the images' and prompt's keys and values through a stop_gradient.
+    def compute_target_loss(self, rng, observation, actions, *, train=False):
+        """The flow loss beside the backbone's cross-entropy on the target tokens, from one backbone pass over
+        [images | prompt | targets] and one action expert pass over the images' and prompt's keys and values, through a
+        stop_gradient when the model insulates (knowledge insulation).
 
         Returns the flow loss [b, ah], the mean cross-entropy of the target tokens, and the stage head's logits."""
         observation, x_t, u_t, time = self._flow_inputs(rng, observation, actions, train=train)
@@ -308,7 +313,9 @@ class Pi0(_model.BaseModel):
         nll = jax.nn.logsumexp(logits, axis=-1) - picked
         ce = jnp.sum(nll * observation.target_mask) / jnp.maximum(jnp.sum(observation.target_mask), 1)
 
-        prefix_kv = jax.tree.map(lambda x: jax.lax.stop_gradient(x[:, :, :n_prefix]), kv_cache)
+        prefix_kv = jax.tree.map(lambda x: x[:, :, :n_prefix], kv_cache)
+        if self.insulate:
+            prefix_kv = jax.lax.stop_gradient(prefix_kv)
         expert_mask = jnp.concatenate(
             [
                 einops.repeat(prefix_mask, "b p -> b s p", s=suffix_tokens.shape[1]),
