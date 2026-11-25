@@ -111,13 +111,16 @@ def without_parentheticals(text: str) -> str:
     return re.sub(r"\s*\(.*?\)", "", text)
 
 
-def annotation(rec: dict, frame: int, *, boxes: bool, names: dict[str, str] | None = None) -> str:
+def annotation(
+    rec: dict, frame: int, *, boxes: bool, names: dict[str, str] | None = None, prompt: str | None = None
+) -> str:
     """A frame's annotation for the backbone's language targets, from its rena-autolabel labels. Located first, as
     pi0.5 and PaliGemma's detection put it: with boxes, the skill target's box on each camera that sees it from the
     clean track, as PaliGemma <loc> tokens over the padded square input. Then the skill phrased as argus phrases its
     commands, which pi05_base already predicts better than the task grammar's terse form, with argus's names or the
     instruction's where `names` gives them (autolabel_prompts.class_names). Then the phase of argus's timeline the frame
-    is in, where the labels carry the timeline:
+    is in, where the labels carry the timeline. The skill is left out when `prompt` already states it with these names
+    or more specific ones, so the target never asks for a copy of the prompt:
 
         Right: <loc..>x4 Wrist: <loc..>x4; pick up the white plush lamb toy; lower and release: teal plush toy, into the bin
     """
@@ -126,6 +129,7 @@ def annotation(rec: dict, frame: int, *, boxes: bool, names: dict[str, str] | No
     from autolabel_prompts import boxes_at
     from autolabel_prompts import loc_box
     from autolabel_prompts import skill_at
+    from autolabel_prompts import skill_text
 
     if (sk := skill_at(rec, frame)) is None:
         return ""
@@ -139,8 +143,9 @@ def annotation(rec: dict, frame: int, *, boxes: bool, names: dict[str, str] | No
         ]
         if views:
             parts.append(" ".join(views))
-    obj, container = ((names or {}).get(k, sk.get(k)) for k in ("object", "container"))
-    parts.append(f"pick up the {obj}" if sk["name"] == "pick" else f"place the {obj} in the {container}")
+    if prompt not in (skill_text(sk, names=names), skill_text(sk)):
+        obj, container = ((names or {}).get(k, sk.get(k)) for k in ("object", "container"))
+        parts.append(f"pick up the {obj}" if sk["name"] == "pick" else f"place the {obj} in the {container}")
     t = frame / rec["fps"]
     timeline = (rec.get("argus_labels") or {}).get("timeline") or []
     if row := next((r for r in timeline if r["start_s"] <= t < r["end_s"]), None):
@@ -198,7 +203,9 @@ class AutolabelPrompt(transforms.DataTransformFn):
 
             # the instruction's names as often as the prompts use them, drawn after the prompt's so those stay as they were
             names = class_names(rec) if rec is not None and rng.random() < self.mix.class_names else None
-            data["annotation"] = "" if rec is None else annotation(rec, frame, boxes=not boxes, names=names)
+            data["annotation"] = (
+                "" if rec is None else annotation(rec, frame, boxes=not boxes, names=names, prompt=text)
+            )
         data["drop_state"] = bool(rng.random() < self.state_dropout)
         return data
 

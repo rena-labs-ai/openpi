@@ -113,6 +113,33 @@ def test_annotation_gives_the_skill_its_tracked_boxes_and_the_argus_phase():
     assert rena_policy.annotation(rec, 10, boxes=False) == "pick up the white plush lamb toy"
 
 
+def test_annotation_leaves_out_a_skill_the_prompt_already_states():
+    pytest.importorskip("autolabel_prompts")
+    rec = _labels()
+    assert rena_policy.annotation(rec, 10, boxes=False, prompt="pick white plush lamb toy") == (
+        "reach toward: white plush lamb toy"
+    )
+    assert rena_policy.annotation(rec, 30, boxes=False, prompt="pick white plush lamb toy") == ""
+    # a prompt naming the object more specifically than the target would also states it
+    generic = {"object": "plush toy"}
+    assert rena_policy.annotation(rec, 30, boxes=False, names=generic, prompt="pick white plush lamb toy") == ""
+
+
+@pytest.mark.parametrize(
+    "prompt",
+    [
+        "pick plush toy and place in box",
+        "pick white plush lamb toy and place in cardboard box",
+        "pick object",
+        "pick plush toy",
+    ],
+)
+def test_annotation_keeps_the_skill_the_prompt_leaves_to_infer(prompt):
+    # the task (which skill now), a nameless box prompt, or a generic name where argus has a specific one
+    pytest.importorskip("autolabel_prompts")
+    assert rena_policy.annotation(_labels(), 30, boxes=False, prompt=prompt) == "pick up the white plush lamb toy"
+
+
 @pytest.mark.parametrize("boxes_in", ["text", "image"])
 def test_annotation_has_boxes_only_when_the_prompt_gives_none(tmp_path, boxes_in):
     pytest.importorskip("autolabel_prompts")
@@ -134,9 +161,12 @@ def test_annotation_names_the_object_as_the_instruction_does_about_half_the_time
     labels = tmp_path / "autolabel.jsonl"
     labels.write_text(json.dumps(rec) + "\n")
     prompter = rena_policy.AutolabelPrompt(str(labels), boxes_in="image", annotate=True)
-    annotations = [
-        prompter({"episode_index": 3, "frame_index": 30, "prompt": "task"})["annotation"] for _ in range(200)
-    ]
-    skills = [a.split("; ")[-1] for a in annotations]
+    outs = [prompter({"episode_index": 3, "frame_index": 30, "prompt": "task"}) for _ in range(400)]
+    # the skill is left out only where the prompt stated it
+    assert {o["prompt"] for o in outs if "pick up" not in o["annotation"]} <= {
+        "pick white plush lamb toy",
+        "pick plush toy",
+    }
+    skills = [o["annotation"].split("; ")[-1] for o in outs if "pick up" in o["annotation"]]
     assert set(skills) == {"pick up the plush toy", "pick up the white plush lamb toy"}
-    assert 70 < skills.count("pick up the plush toy") < 130
+    assert 0.25 < skills.count("pick up the plush toy") / len(skills) < 0.75
