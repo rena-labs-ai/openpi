@@ -18,12 +18,19 @@ class LoRAConfig:
     alpha: float = 1.0
     # Initialization function for LoRA parameters.
     init_fn: nn.initializers.Initializer = nn.initializers.normal(stddev=0.01)
+    # Initialization function for B, the second factor; None initializes it as A. Zeros start the adapted weights exactly
+    # at the base weights.
+    b_init_fn: nn.initializers.Initializer | None = None
     # Enable rank-stabilized LoRA: https://arxiv.org/pdf/2312.03732
     rslora: bool = False
     # Axes in the weight to apply LoRA to. Should typically be the last two axes.
     axes: tuple[int, int] = (-2, -1)
     # Axis label which is used by LoRA in einsum equations. Must not be present in the original equation.
     label: str = "L"
+
+    @property
+    def init_b(self) -> nn.initializers.Initializer:
+        return self.init_fn if self.b_init_fn is None else self.b_init_fn
 
     @property
     def scaling_value(self) -> float:
@@ -49,7 +56,7 @@ class Einsum(nn.Module):
             shape_a[config.axes[1]] = config.rank
             shape_b[config.axes[0]] = config.rank
             self.w_a = self.param("lora_a", config.init_fn, shape_a)
-            self.w_b = self.param("lora_b", config.init_fn, shape_b)
+            self.w_b = self.param("lora_b", config.init_b, shape_b)
 
     @nn.compact
     def __call__(self, eqn: str, x):
@@ -112,12 +119,12 @@ class FeedForward(nn.Module):
             self.w_gating_lora = (
                 self.param("gating_einsum_lora_a", self.lora_config.init_fn, (2, self.features, self.lora_config.rank)),
                 self.param(
-                    "gating_einsum_lora_b", self.lora_config.init_fn, (2, self.lora_config.rank, self.hidden_dim)
+                    "gating_einsum_lora_b", self.lora_config.init_b, (2, self.lora_config.rank, self.hidden_dim)
                 ),
             )
             self.w_linear_lora = (
                 self.param("linear_lora_a", self.lora_config.init_fn, (self.hidden_dim, self.lora_config.rank)),
-                self.param("linear_lora_b", self.lora_config.init_fn, (self.lora_config.rank, self.features)),
+                self.param("linear_lora_b", self.lora_config.init_b, (self.lora_config.rank, self.features)),
             )
 
     @nn.compact
@@ -145,4 +152,6 @@ class FeedForward(nn.Module):
         base = jnp.dot(x, w.astype(x.dtype))
         if lora_weights is None:
             return base
-        return base + jnp.dot(jnp.dot(x, lora_weights[0].astype(x.dtype)), lora_weights[1].astype(x.dtype))
+        assert self.lora_config is not None
+        lora = jnp.dot(jnp.dot(x, lora_weights[0].astype(x.dtype)), lora_weights[1].astype(x.dtype))
+        return base + lora * self.lora_config.scaling_value

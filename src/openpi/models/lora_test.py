@@ -92,3 +92,34 @@ def test_lora_ffn_same_output():
     output_lora = ffn_lora.apply(params_lora, x)
 
     assert jnp.allclose(output, output_lora)
+
+
+def test_lora_ffn_scales_the_adapter_like_the_einsum():
+    key = jax.random.key(0)
+    x = jax.random.normal(key, (2, 8))
+    ffn = lora.FeedForward(features=8, hidden_dim=32, lora_config=lora.LoRAConfig(rank=2, alpha=2.0))
+    params = ffn.init(key, x)
+    base = lora.FeedForward(features=8, hidden_dim=32).apply(
+        {"params": {k: v for k, v in params["params"].items() if "lora" not in k}}, x
+    )
+    halved = lora.FeedForward(features=8, hidden_dim=32, lora_config=lora.LoRAConfig(rank=2, alpha=1.0))
+    linear_only = {k: (v if k != "gating_einsum_lora_b" else jnp.zeros_like(v)) for k, v in params["params"].items()}
+
+    full = ffn.apply({"params": linear_only}, x) - base
+    half = halved.apply({"params": linear_only}, x) - base
+    assert jnp.allclose(half, full / 2, atol=1e-5)
+    assert not jnp.allclose(full, 0)
+
+
+def test_lora_zero_b_starts_at_the_base_weights():
+    key = jax.random.key(0)
+    x = jax.random.normal(key, (2, 8))
+    ffn = lora.FeedForward(
+        features=8, hidden_dim=32, lora_config=lora.LoRAConfig(rank=2, b_init_fn=nn.initializers.zeros)
+    )
+    params = ffn.init(key, x)
+    assert jnp.any(params["params"]["linear_lora_a"] != 0)
+    base = lora.FeedForward(features=8, hidden_dim=32).apply(
+        {"params": {k: v for k, v in params["params"].items() if "lora" not in k}}, x
+    )
+    assert jnp.allclose(ffn.apply(params, x), base)
