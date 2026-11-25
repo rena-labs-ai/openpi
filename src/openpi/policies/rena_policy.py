@@ -112,21 +112,22 @@ def without_parentheticals(text: str) -> str:
 
 
 def annotation(rec: dict, frame: int, *, boxes: bool, names: dict[str, str] | None = None) -> str:
-    """A frame's annotation for the backbone's language targets, from its rena-autolabel labels: the skill in the task
-    grammar with argus's names, or the instruction's where `names` gives them (autolabel_prompts.class_names); with boxes, the skill target's box on each camera that sees it from the
+    """A frame's annotation for the backbone's language targets, from its rena-autolabel labels: the skill phrased as
+    argus phrases its commands, which pi05_base already predicts better than the task grammar's terse form, with
+    argus's names or the instruction's where `names` gives them (autolabel_prompts.class_names); with boxes, the skill target's box on each camera that sees it from the
     clean track, as autolabel_prompts writes box prompts; then the phase of argus's timeline the frame is in, where the
     labels carry the timeline:
 
-        pick white plush lamb toy at Right: <loc..>x4 Wrist: <loc..>x4; lower and release: teal plush toy, into the bin
+        pick up the white plush lamb toy at Right: <loc..>x4 Wrist: <loc..>x4; lower and release: teal plush toy, into the bin
     """
     from autolabel_prompts import boxes_at
     from autolabel_prompts import skill_at
-    from autolabel_prompts import skill_text
     from autolabel_prompts import with_boxes
 
     if (sk := skill_at(rec, frame)) is None:
         return ""
-    text = skill_text(sk, names=names)
+    obj, container = ((names or {}).get(k, sk.get(k)) for k in ("object", "container"))
+    text = f"pick up the {obj}" if sk["name"] == "pick" else f"place the {obj} in the {container}"
     if boxes:
         text = with_boxes(text, {c: b["box"] for c, b in boxes_at(sk, frame, "track").items() if b}, rec["image_sizes"])
     t = frame / rec["fps"]

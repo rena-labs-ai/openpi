@@ -102,14 +102,15 @@ def test_annotation_gives_the_skill_its_tracked_boxes_and_the_argus_phase():
     rec = _labels()
     right, wrist = loc_box([0.25, 0.25, 0.5, 0.5], (640, 480), 224), loc_box([0.0, 0.5, 0.5, 1.0], (640, 480), 224)
     assert rena_policy.annotation(rec, 10, boxes=True) == (
-        f"pick white plush lamb toy at Right: {right} Wrist: {wrist}; reach toward: white plush lamb toy"
+        f"pick up the white plush lamb toy at Right: {right} Wrist: {wrist}; reach toward: white plush lamb toy"
     )
-    assert rena_policy.annotation(rec, 30, boxes=False) == "pick white plush lamb toy"
+    assert rena_policy.annotation(rec, 30, boxes=False) == "pick up the white plush lamb toy"
     assert rena_policy.annotation(rec, 60, boxes=False) == (
-        "place white plush lamb toy in cardboard box; lower and release: white plush lamb toy, into the cardboard box"
+        "place the white plush lamb toy in the cardboard box; lower and release: white plush lamb toy, into the "
+        "cardboard box"
     )
     del rec["argus_labels"]
-    assert rena_policy.annotation(rec, 10, boxes=False) == "pick white plush lamb toy"
+    assert rena_policy.annotation(rec, 10, boxes=False) == "pick up the white plush lamb toy"
 
 
 @pytest.mark.parametrize("boxes_in", ["text", "image"])
@@ -137,5 +138,5 @@ def test_annotation_names_the_object_as_the_instruction_does_about_half_the_time
         prompter({"episode_index": 3, "frame_index": 30, "prompt": "task"})["annotation"] for _ in range(200)
     ]
     skills = [a.split(" at ")[0] for a in annotations]
-    assert set(skills) == {"pick plush toy", "pick white plush lamb toy"}
-    assert 70 < skills.count("pick plush toy") < 130
+    assert set(skills) == {"pick up the plush toy", "pick up the white plush lamb toy"}
+    assert 70 < skills.count("pick up the plush toy") < 130
