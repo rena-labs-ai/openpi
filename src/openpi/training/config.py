@@ -1030,6 +1030,8 @@ _CONFIGS = [
                     "targets": "cotrain",
                     "vl_datasets": ("vl/refcoco", "vl/robopoint_object", "vl/robopoint_region"),
                     "vl_share": 0.1,
+                    # boxes as rena's annotations give them, then points on objects and on free space
+                    "vl_weights": (0.5, 0.25, 0.25),
                 },
             ),
         )
