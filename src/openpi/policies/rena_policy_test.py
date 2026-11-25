@@ -125,3 +125,17 @@ def test_annotation_has_boxes_only_when_the_prompt_gives_none(tmp_path, boxes_in
         assert has_box != ("<loc" in out["annotation"])
         given.add(has_box)
     assert given == {True, False}
+
+
+def test_annotation_names_the_object_as_the_instruction_does_about_half_the_time(tmp_path):
+    pytest.importorskip("autolabel_prompts")
+    rec = _labels() | {"argus": {"matches_given": True, "issues": []}}
+    labels = tmp_path / "autolabel.jsonl"
+    labels.write_text(json.dumps(rec) + "\n")
+    prompter = rena_policy.AutolabelPrompt(str(labels), boxes_in="image", annotate=True)
+    annotations = [
+        prompter({"episode_index": 3, "frame_index": 30, "prompt": "task"})["annotation"] for _ in range(200)
+    ]
+    skills = [a.split(" at ")[0] for a in annotations]
+    assert set(skills) == {"pick plush toy", "pick white plush lamb toy"}
+    assert 70 < skills.count("pick plush toy") < 130

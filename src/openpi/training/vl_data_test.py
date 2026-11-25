@@ -15,7 +15,8 @@ def test_vl_samples_fill_the_base_camera_and_learn_no_actions(tmp_path):
     sample = vl_data.VLInputs(action_horizon=50, action_dim=7)(vl_data.VLDataset(tmp_path)[0])
     assert sample["image"]["base_0_rgb"].shape == (30, 40, 3)
     assert not sample["image"]["left_wrist_0_rgb"].any()
-    assert sample["image_mask"]["base_0_rgb"] and not sample["image_mask"]["right_wrist_0_rgb"]
+    assert sample["image_mask"]["base_0_rgb"]
+    assert not sample["image_mask"]["right_wrist_0_rgb"]
     assert not sample["action_loss_mask"]
     assert sample["actions"].shape == (50, 7)
     assert (sample["prompt"], sample["annotation"]) == ("detect cup", "<loc0001>" * 4)

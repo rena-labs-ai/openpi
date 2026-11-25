@@ -53,32 +53,50 @@ def refcoco(annotations: pathlib.Path, images: pathlib.Path, out: pathlib.Path, 
         )
         box = [x / info["width"], y / info["height"], (x + w) / info["width"], (y + h) / info["height"]]
         sentence = r["sentences"][rng.integers(len(r["sentences"]))]["sent"]
-        samples.append({"image": f"images/{name}", "prompt": f"detect {sentence}", "target": loc_box(box, size, Mix.input_px)})
+        samples.append(
+            {"image": f"images/{name}", "prompt": f"detect {sentence}", "target": loc_box(box, size, Mix.input_px)}
+        )
         if len(samples) >= limit:
             break
     return samples
 
 
-def robopoint(questions: pathlib.Path, images: pathlib.Path, out: pathlib.Path, kind: str, limit: int, max_side: int,
-              seed: int):
+def robopoint(
+    questions: pathlib.Path, images: pathlib.Path, out: pathlib.Path, kind: str, limit: int, max_side: int, seed: int
+):
     """RoboPoint's questions of one kind, without the answer-format sentence, and its points (at most eight)."""
     rows = [r for r in json.loads(questions.read_text()) if r["id"].startswith(f"{kind}/")]
     np.random.default_rng(seed).shuffle(rows)
     samples = []
     for r in tqdm.tqdm(rows[:limit]):
         question = r["conversations"][0]["value"].replace("<image>\n", "").split(" Your answer should be formatted")[0]
-        points = [(float(a), float(b)) for a, b in re.findall(r"\(([0-9.]+),\s*([0-9.]+)\)", r["conversations"][1]["value"])]
+        points = [
+            (float(a), float(b)) for a, b in re.findall(r"\(([0-9.]+),\s*([0-9.]+)\)", r["conversations"][1]["value"])
+        ]
         if not points:
             continue
         name = r["image"].replace("/", "_")
         size = save_image(images / r["image"], out, name, max_side)
-        samples.append({"image": f"images/{name}", "prompt": question,
-                        "target": "".join(loc_point(x, y, size) for x, y in points[:8])})
+        samples.append(
+            {
+                "image": f"images/{name}",
+                "prompt": question,
+                "target": "".join(loc_point(x, y, size) for x, y in points[:8]),
+            }
+        )
     return samples
 
 
-def main(source: str, annotations: pathlib.Path, images: pathlib.Path, out: pathlib.Path, kind: str = "object_ref",
-         limit: int = 50_000, max_side: int = 448, seed: int = 0) -> None:
+def main(
+    source: str,
+    annotations: pathlib.Path,
+    images: pathlib.Path,
+    out: pathlib.Path,
+    kind: str = "object_ref",
+    limit: int = 50_000,
+    max_side: int = 448,
+    seed: int = 0,
+) -> None:
     out.mkdir(parents=True, exist_ok=True)
     if source == "refcoco":
         samples = refcoco(annotations, images, out, limit, max_side, seed)

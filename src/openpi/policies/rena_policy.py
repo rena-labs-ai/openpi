@@ -111,9 +111,9 @@ def without_parentheticals(text: str) -> str:
     return re.sub(r"\s*\(.*?\)", "", text)
 
 
-def annotation(rec: dict, frame: int, *, boxes: bool) -> str:
-    """A frame's annotation for knowledge insulation to train the backbone on, from its rena-autolabel labels: the skill
-    in the task grammar with argus's names; with boxes, the skill target's box on each camera that sees it from the
+def annotation(rec: dict, frame: int, *, boxes: bool, names: dict[str, str] | None = None) -> str:
+    """A frame's annotation for the backbone's language targets, from its rena-autolabel labels: the skill in the task
+    grammar with argus's names, or the instruction's where `names` gives them (autolabel_prompts.class_names); with boxes, the skill target's box on each camera that sees it from the
     clean track, as autolabel_prompts writes box prompts; then the phase of argus's timeline the frame is in, where the
     labels carry the timeline:
 
@@ -126,7 +126,7 @@ def annotation(rec: dict, frame: int, *, boxes: bool) -> str:
 
     if (sk := skill_at(rec, frame)) is None:
         return ""
-    text = skill_text(sk)
+    text = skill_text(sk, names=names)
     if boxes:
         text = with_boxes(text, {c: b["box"] for c, b in boxes_at(sk, frame, "track").items() if b}, rec["image_sizes"])
     t = frame / rec["fps"]
@@ -183,7 +183,11 @@ class AutolabelPrompt(transforms.DataTransformFn):
             else:
                 data["prompt"], data["target_boxes"] = text, boxes
         if self.annotate:
-            data["annotation"] = "" if rec is None else annotation(rec, frame, boxes=not boxes)
+            from autolabel_prompts import class_names
+
+            # the instruction's names as often as the prompts use them, drawn after the prompt's so those stay as they were
+            names = class_names(rec) if rec is not None and rng.random() < self.mix.class_names else None
+            data["annotation"] = "" if rec is None else annotation(rec, frame, boxes=not boxes, names=names)
         data["drop_state"] = bool(rng.random() < self.state_dropout)
         return data
 
