@@ -69,3 +69,13 @@ def test_ki_targets_are_the_annotation_then_fast_tokens():
     assert tokens[n - 1] == sentencepiece.eos_id()
     only_text, text_mask = tokenizer.tokenize("pick toy", None)
     assert sentencepiece.decode(only_text[: text_mask.sum()].tolist()) == "pick toy\n"
+
+
+def test_an_empty_annotation_is_a_target_only_before_fast_tokens():
+    tokenizer = _tokenizer.KITargetTokenizer(max_len=128)
+    _, mask = tokenizer.tokenize("", None)
+    assert not mask.any()
+    actions = np.zeros((50, 7))
+    tokens, mask = tokenizer.tokenize("", actions)
+    assert tokens[0] == tokenizer.end_of_annotation
+    assert (tokens[1 : int(mask.sum()) - 1] == tokenizer.fast_ids(actions)).all()

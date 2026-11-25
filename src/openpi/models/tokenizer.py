@@ -172,7 +172,9 @@ class KITargetTokenizer:
 
     def tokenize(self, annotation: str | None, actions: np.ndarray | None) -> tuple[np.ndarray, np.ndarray]:
         """Target tokens [max_len] and their mask."""
-        tokens = [] if annotation is None else [*self._tokenizer.encode(annotation), self.end_of_annotation]
+        # an empty annotation with no actions after it has nothing to teach, not even where it ends
+        no_text = annotation is None or (not annotation and actions is None)
+        tokens = [] if no_text else [*self._tokenizer.encode(annotation), self.end_of_annotation]
         if actions is not None:
             tokens += [*self.fast_ids(actions).tolist(), self._tokenizer.eos_id()]
         if len(tokens) > self._max_len:
