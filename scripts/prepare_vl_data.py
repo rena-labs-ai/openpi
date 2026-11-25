@@ -2,8 +2,9 @@
 object and free-space references: an image, a prompt, and a target of PaliGemma <loc> tokens over the image padded to
 the model's square input (autolabel_prompts.loc_box), four per box and two (y, x) per point.
 
-    uv run scripts/prepare_vl_data.py refcoco ANNOTATIONS.parquet COCO_IMAGES_DIR OUT [--limit N]
-    uv run scripts/prepare_vl_data.py robopoint robopoint_1432k.json IMAGES_DIR OUT --kind object_ref [--limit N]
+    uv run scripts/prepare_vl_data.py --source refcoco --annotations ANNOTATIONS.parquet --images COCO_DIR --out OUT
+    uv run scripts/prepare_vl_data.py --source robopoint --annotations robopoint_1432k.json --images IMAGES_DIR \
+        --out OUT --kind object_ref [--limit N]
 
 Images are saved with their longest side at most --max-side pixels; boxes and points are fractions, so they hold.
 """
