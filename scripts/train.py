@@ -153,11 +153,17 @@ def train_step(
     ):
         acts = observation.action_loss_mask
         if isinstance(config.model, _pi0_config.Pi0Config) and config.model.language_targets:
-            chunked_loss, target_ce, stage_logits = model.compute_target_loss(rng, observation, actions, train=True)
+            chunked_loss, nll, stage_logits = model.compute_target_loss(rng, observation, actions, train=True)
+            target_ce = _pi0.target_ce(nll, observation.target_mask)
+            aux = {"target_ce": target_ce}
             if acts is not None:  # the flow over the samples with actions to learn
                 chunked_loss = chunked_loss * acts[:, None] * (acts.shape[0] / jnp.maximum(jnp.sum(acts), 1))
+                aux |= {
+                    "target_ce_robot": target_ce_of(nll, observation.target_mask, acts),
+                    "target_ce_vl": target_ce_of(nll, observation.target_mask, ~acts),
+                }
             flow = jnp.mean(chunked_loss)
-            loss, aux = flow + config.target_loss_weight * target_ce, {"target_ce": target_ce}
+            loss = flow + config.target_loss_weight * target_ce
         elif config.stage_loss_weight:
             chunked_loss, stage_logits = model.compute_loss_and_stage(rng, observation, actions, train=True)
             loss = flow = jnp.mean(chunked_loss)
@@ -210,11 +216,16 @@ def train_step(
     info = {
         "loss": loss,
         "grad_norm": optax.global_norm(grads),
-        **(_optimizer.module_norms(grads) if getattr(config.optimizer, "clip_per_module", False) else {}),
+        **(_optimizer.module_norms(grads) if isinstance(config.model, _pi0_config.Pi0Config) else {}),
         "param_norm": optax.global_norm(kernel_params),
         **aux,
     }
     return new_state, info
+
+
+def target_ce_of(nll: at.Array, target_mask: at.Array, keep: at.Array) -> at.Array:
+    """The target cross-entropy of the samples keep [b] keeps; nan when they have no targets, which logging skips."""
+    return jnp.where(jnp.any(target_mask & keep[:, None]), _pi0.target_ce(nll, target_mask, keep), jnp.nan)
 
 
 def saved_model(state: training_utils.TrainState) -> _model.BaseModel:
@@ -234,7 +245,8 @@ def holdout_step(
     loss_rng, sample_rng = jax.random.split(rng)
     target_ce = None
     if isinstance(config.model, _pi0_config.Pi0Config) and config.model.language_targets:
-        flow, target_ce, _ = model.compute_target_loss(loss_rng, observation, batch["actions"], train=False)
+        flow, nll, _ = model.compute_target_loss(loss_rng, observation, batch["actions"], train=False)
+        target_ce = _pi0.target_ce(nll, observation.target_mask)
     else:
         flow = model.compute_loss(loss_rng, observation, batch["actions"], train=False)
     return flow, target_ce, model.sample_actions(sample_rng, observation, num_steps=10)
@@ -244,8 +256,8 @@ def detect_step(state: training_utils.TrainState, batch: dict, rng: at.KeyArrayL
     """A detect batch's target cross-entropy and greedily decoded boxes [b, 4] in <loc> bins."""
     model = saved_model(state)
     observation = _model.Observation.from_dict(batch)
-    _, target_ce, _ = model.compute_target_loss(rng, observation, batch["actions"], train=False)
-    return target_ce, model.decode_locs(observation)
+    _, nll, _ = model.compute_target_loss(rng, observation, batch["actions"], train=False)
+    return _pi0.target_ce(nll, observation.target_mask), model.decode_locs(observation)
 
 
 def detect_scores(
@@ -276,8 +288,9 @@ def detect_scores(
 
 def holdout_scores(
     holdout: _holdout.Holdout, pholdout_step, state: training_utils.TrainState, data_sharding, mesh, prefix: str
-) -> dict[str, float]:
-    """The holdout's flow loss and sampled-action errors, with the same noise and flow times every time."""
+) -> tuple[dict[str, float], list[float], list[wandb.Image]]:
+    """The holdout's flow loss and sampled-action errors, with the same noise and flow times every time; its joint MAE
+    per chunk step; and its showcase frames' chunks plotted against the commanded ones."""
     rngs = jax.random.split(jax.random.key(0), len(holdout.batches))
     flows, ces, predicted = [], [], []
     for r, b in zip(rngs, holdout.batches, strict=True):
@@ -287,14 +300,22 @@ def holdout_scores(
         ces.append(ce)
         predicted.append(np.asarray(actions))
     flow = np.concatenate(flows)
-    report = holdout.report(holdout.errors(predicted))
-    scores = {f"{prefix}/flow_loss": float(flow.mean()), f"{prefix}/gripper_mae": report["all"]["gripper_mae"]}
+    got = holdout.absolute(predicted)
+    report = holdout.report(got)
+    scores = {
+        f"{prefix}/flow_loss": float(flow.mean()),
+        **{f"{prefix}/{k}": report["all"][k] for k in ("gripper_mae", "gripper_event_recall", "gripper_false_switch")},
+    }
     if ces[0] is not None:
         scores[f"{prefix}/target_ce"] = float(np.mean([float(c) for c in ces]))
     for group, summary in {"all": report["all"], **report["by_prompt"]}.items():
         suffix = "" if group == "all" else f"_{group}"
         scores[f"{prefix}/joint_mae{suffix}"] = summary["joint_mae"]
-    return scores
+    plots = [
+        wandb.Image(_holdout.plot_chunk(got[i], holdout.want[i], f"{holdout.kinds[i]} prompt, {holdout.sources[i]}"))
+        for i in holdout.showcase()
+    ]
+    return scores, report["all"]["joint_mae_by_step"], plots
 
 
 def main(config: _config.TrainConfig):
@@ -408,7 +429,7 @@ def main(config: _config.TrainConfig):
         infos.append(info)
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
-            reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
+            reduced_info = jax.device_get(jax.tree.map(jnp.nanmean, stacked_infos))
             now = time.monotonic()
             reduced_info |= {
                 "lr": float(lr_schedule(step)),
@@ -423,8 +444,15 @@ def main(config: _config.TrainConfig):
         if (holdouts or detects) and (step % config.holdout_interval == 0 or step == config.num_train_steps - 1):
             scoring_start = time.monotonic()
             scores = {}
+            by_step = {}
             for split, holdout in holdouts.items():
-                scores |= holdout_scores(holdout, pholdout_step, train_state, data_sharding, mesh, split)
+                got, by_step[split], plots = holdout_scores(
+                    holdout, pholdout_step, train_state, data_sharding, mesh, split
+                )
+                scores |= got
+                wandb.log({f"{split}/chunks": plots}, step=step)
+            if by_step:
+                wandb.log({"joint_mae_by_step": wandb.Image(_holdout.plot_by_step(by_step))}, step=step)
             for name, detect in detects.items():
                 got, drawn = detect_scores(detect, pdetect_step, train_state, data_sharding, mesh, name)
                 scores |= got

@@ -27,33 +27,107 @@ class Holdout:
     sources: list[str]  # the recording's dataset
     outputs: Callable[[dict], dict]  # one sample's model output -> absolute actions, as the policy's output transforms
 
-    def errors(self, predicted: list[np.ndarray]) -> np.ndarray:
-        """Each batch's normalized model actions [b, horizon, dim] -> absolute errors [n, horizon, 7]."""
+    def absolute(self, predicted: list[np.ndarray]) -> np.ndarray:
+        """Each batch's normalized model actions [b, horizon, dim] -> absolute joint targets and gripper [n, horizon, 7]."""
         states = [s for b in self.batches for s in b["state"]]
         actions = [a for p in predicted for a in p]
-        got = np.stack(
+        return np.stack(
             [self.outputs({"state": s, "actions": a})["actions"] for s, a in zip(states, actions, strict=True)]
         )
-        return np.abs(got - self.want)
 
-    def report(self, err: np.ndarray) -> dict:
+    def report(self, got: np.ndarray) -> dict:
         kinds, sources = np.array(self.kinds), np.array(self.sources)
         return {
-            "all": summary(err),
-            "by_prompt": {k: summary(err[kinds == k]) for k in sorted(set(self.kinds))},
-            "by_source": {k: summary(err[sources == k]) for k, _ in collections.Counter(self.sources).most_common()},
+            "all": summary(got, self.want),
+            "by_prompt": {k: summary(got[kinds == k], self.want[kinds == k]) for k in sorted(set(self.kinds))},
+            "by_source": {
+                k: summary(got[sources == k], self.want[sources == k])
+                for k, _ in collections.Counter(self.sources).most_common()
+            },
         }
 
+    def showcase(self, k: int = 6) -> list[int]:
+        """k frames to plot, the same every time: half whose commanded gripper opens or closes within the chunk, the
+        rest those whose joints travel furthest."""
+        switching = np.flatnonzero(gripper_switch(self.want[..., 6]) >= 0)
+        events = switching[np.linspace(0, len(switching) - 1, min(k // 2, len(switching))).round().astype(int)]
+        travel = np.abs(np.diff(self.want[..., :6], axis=1)).sum((1, 2))
+        rest = [int(i) for i in np.argsort(-travel) if i not in set(events)][: k - len(events)]
+        return [int(i) for i in events] + rest
 
-def summary(err: np.ndarray) -> dict:
-    """err [n, horizon, 7]: joints in rad, the gripper in its 0-1 range."""
+
+GRIPPER_TOLERANCE = 5  # steps either way a predicted gripper switch may be off by and still count
+
+
+def gripper_switch(gripper: np.ndarray) -> np.ndarray:
+    """[n, horizon] gripper in 0-1 -> [n] the first step it is open where it was closed at step 0 or the reverse; -1
+    where it never switches."""
+    closed = gripper > 0.5
+    switched = closed != closed[:, :1]
+    return np.where(switched.any(1), switched.argmax(1), -1)
+
+
+def summary(got: np.ndarray, want: np.ndarray) -> dict:
+    """got, want [n, horizon, 7]: joints in rad, the gripper in its 0-1 range. A gripper event is a commanded switch
+    within the chunk; the model catches it with a switch of its own within GRIPPER_TOLERANCE steps."""
+    err = np.abs(got - want)
+    t_want, t_got = gripper_switch(want[..., 6]), gripper_switch(got[..., 6])
+    events = t_want >= 0
+    caught = events & (t_got >= 0) & (np.abs(t_got - t_want) <= GRIPPER_TOLERANCE)
     return {
         "n": len(err),
         "joint_mae": float(err[..., :6].mean()),
         "joint_mae_per_joint": err[..., :6].mean((0, 1)).round(4).tolist(),
         "gripper_mae": float(err[..., 6].mean()),
         "joint_mae_by_step": err[:, :, :6].mean((0, 2)).round(4).tolist(),
+        "gripper_events": int(events.sum()),
+        "gripper_event_recall": float(caught.sum() / events.sum()) if events.any() else float("nan"),
+        "gripper_false_switch": float((t_got[~events] >= 0).mean()) if (~events).any() else float("nan"),
     }
+
+
+def pyplot():
+    import matplotlib as mpl
+
+    mpl.use("Agg")
+    import matplotlib.pyplot as plt
+
+    return plt
+
+
+def figure_image(fig) -> np.ndarray:
+    """The figure as an RGB image, closed."""
+    fig.tight_layout()
+    fig.canvas.draw()
+    image = np.asarray(fig.canvas.buffer_rgba())[..., :3].copy()
+    pyplot().close(fig)
+    return image
+
+
+def plot_chunk(got: np.ndarray, want: np.ndarray, title: str) -> np.ndarray:
+    """One frame's predicted (red) and commanded (black) chunk [horizon, 7], a panel per joint and the gripper, as an
+    RGB image."""
+    plt = pyplot()
+    fig, axes = plt.subplots(1, 7, figsize=(14, 2), dpi=80)
+    for j, ax in enumerate(axes):
+        ax.plot(want[:, j], "k", lw=1.5)
+        ax.plot(got[:, j], "r", lw=1.2)
+        ax.set_title("gripper" if j == 6 else f"joint {j}", fontsize=8)
+        ax.tick_params(labelsize=6)
+    fig.suptitle(title, fontsize=8)
+    return figure_image(fig)
+
+
+def plot_by_step(by_step: dict[str, list[float]]) -> np.ndarray:
+    """Joint MAE per chunk step, a line per split, as an RGB image."""
+    plt = pyplot()
+    fig, ax = plt.subplots(figsize=(5, 3), dpi=80)
+    for name, values in by_step.items():
+        ax.plot(values, label=name)
+    ax.set_xlabel("chunk step")
+    ax.set_ylabel("joint MAE (rad)")
+    ax.legend(fontsize=8)
+    return figure_image(fig)
 
 
 def prompt_kind(prompter: rena_policy.AutolabelPrompt, rec: dict, frame: int) -> str:
@@ -81,7 +155,8 @@ def load(
     factory = dataclasses.replace(config.data, split=split)
     data_config = factory.create(config.assets_dirs, config.model)
     repack = [
-        dataclasses.replace(t, seed=seed) if isinstance(t, rena_policy.AutolabelPrompt) else t
+        # the state in every prompt, as a robot sends it
+        dataclasses.replace(t, seed=seed, state_dropout=0.0) if isinstance(t, rena_policy.AutolabelPrompt) else t
         for t in data_config.repack_transforms.inputs
     ]
     prompter = next(t for t in repack if isinstance(t, rena_policy.AutolabelPrompt))

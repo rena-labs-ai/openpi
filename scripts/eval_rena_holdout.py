@@ -50,7 +50,7 @@ def main(
         "seed": seed,
         "split": split,
         "num_steps": num_steps,
-        **holdout.report(holdout.errors(predicted)),
+        **holdout.report(holdout.absolute(predicted)),
     }
     out.write_text(json.dumps(res, indent=1))
     a = res["all"]

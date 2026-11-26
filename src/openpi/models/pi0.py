@@ -53,6 +53,13 @@ def target_predictors(out, last_prompt, n_prefix):
     return jnp.concatenate([first, out[:, n_prefix:-1]], axis=1)
 
 
+def target_ce(nll, target_mask, keep=None):
+    """Mean cross-entropy of the target tokens target_mask [b, t] marks, over the samples keep [b] keeps (all by
+    default); 0 when none is left."""
+    w = target_mask if keep is None else target_mask & keep[:, None]
+    return jnp.sum(nll * w) / jnp.maximum(jnp.sum(w), 1)
+
+
 def ki_masks(prefix_mask, prefix_ar_mask, target_mask):
     """Knowledge insulation's backbone pass over [images | prompt | targets]: the prefix bidirectional and the targets
     causal after it. Returns the input mask [b, p + t] and the attention mask [b, p + t, p + t]."""
@@ -316,7 +323,8 @@ class Pi0(_model.BaseModel):
         [images | prompt | targets] and one action expert pass over the images' and prompt's keys and values, through a
         stop_gradient when the model insulates (knowledge insulation).
 
-        Returns the flow loss [b, ah], the mean cross-entropy of the target tokens, and the stage head's logits."""
+        Returns the flow loss [b, ah], each target token's cross-entropy [b, t] (target_ce averages it), and the stage
+        head's logits."""
         observation, x_t, u_t, time = self._flow_inputs(rng, observation, actions, train=train)
         prefix_tokens, prefix_mask, prefix_ar_mask, n_img_tokens = self.embed_prefix(observation)
         suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(observation, x_t, time)
@@ -333,7 +341,6 @@ class Pi0(_model.BaseModel):
         logits = self.PaliGemma.llm(target_predictors(out, last_prompt, n_prefix), method="deembed")
         picked = jnp.take_along_axis(logits, observation.target_tokens[..., None], axis=-1)[..., 0]
         nll = jax.nn.logsumexp(logits, axis=-1) - picked
-        ce = jnp.sum(nll * observation.target_mask) / jnp.maximum(jnp.sum(observation.target_mask), 1)
 
         prefix_kv = jax.tree.map(lambda x: x[:, :, :n_prefix], kv_cache)
         if self.insulate:
@@ -354,7 +361,7 @@ class Pi0(_model.BaseModel):
         )
         v_t = self.action_out_proj(suffix_out[:, -self.action_horizon :])
         flow = jnp.mean(jnp.square(v_t - u_t), axis=-1)
-        return flow, ce, self._stage_logits_from_prefix(out[:, :n_prefix], prefix_mask, n_img_tokens)
+        return flow, nll, self._stage_logits_from_prefix(out[:, :n_prefix], prefix_mask, n_img_tokens)
 
     def _sample_actions_impl(
         self,

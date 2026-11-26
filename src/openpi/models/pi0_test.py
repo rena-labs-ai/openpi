@@ -12,6 +12,7 @@ from openpi.models.pi0 import LOC0
 from openpi.models.pi0 import ki_masks
 from openpi.models.pi0 import masked_mean_pool
 from openpi.models.pi0 import stage_ce_and_acc
+from openpi.models.pi0 import target_ce
 import openpi.models.pi0_config as _pi0_config
 import openpi.shared.nnx_utils as nnx_utils
 import openpi.training.optimizer as _optimizer
@@ -188,9 +189,11 @@ def ki():
 def test_ki_flow_loss_ignores_the_targets_and_trains_only_the_expert(ki):
     config, model, obs = ki
     act = jnp.asarray(np.random.default_rng(1).normal(size=(2, config.action_horizon, config.action_dim)), jnp.float32)
-    flow, ce, stage_logits = model.compute_target_loss(jax.random.key(1), obs, act)
+    flow, nll, stage_logits = model.compute_target_loss(jax.random.key(1), obs, act)
+    ce = target_ce(nll, obs.target_mask)
     other = dataclasses.replace(obs, target_tokens=obs.target_tokens + 7)
-    other_flow, other_ce, _ = model.compute_target_loss(jax.random.key(1), other, act)
+    other_flow, other_nll, _ = model.compute_target_loss(jax.random.key(1), other, act)
+    other_ce = target_ce(other_nll, other.target_mask)
     assert flow.shape == (2, config.action_horizon)
     assert stage_logits.shape == (2, config.num_stage_classes)
     assert jnp.array_equal(flow, other_flow)
@@ -216,7 +219,8 @@ def test_ki_optimizer_splits_modules_by_the_loss_that_trains_them(ki):
         lambda m: jnp.mean(m.compute_target_loss(jax.random.key(1), obs, act)[0]), argnums=nnx.DiffState(0, params)
     )(model)
     ce_grads = nnx.grad(
-        lambda m: m.compute_target_loss(jax.random.key(1), obs, act)[1], argnums=nnx.DiffState(0, params)
+        lambda m: target_ce(m.compute_target_loss(jax.random.key(1), obs, act)[1], obs.target_mask),
+        argnums=nnx.DiffState(0, params),
     )(model)
     labels = _optimizer.module_labels(nnx.state(model, params))
     for grads, module in ((flow_grads, "expert"), (ce_grads, "backbone")):
@@ -267,7 +271,7 @@ def test_each_decoded_loc_is_the_one_the_target_loss_finds_likeliest_after_the_o
             target_tokens=jnp.asarray(tokens + LOC0, jnp.int32),
             target_mask=jnp.broadcast_to(jnp.arange(4) <= upto, (2, 4)),
         )
-        return float(model.compute_target_loss(jax.random.key(0), o, act)[1])
+        return float(target_ce(model.compute_target_loss(jax.random.key(0), o, act)[1], o.target_mask))
 
     for i in range(4):
         for other in (0, 511, 1023, 77):
