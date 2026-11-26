@@ -3,6 +3,8 @@ import json
 import numpy as np
 from PIL import Image
 
+from openpi import transforms
+from openpi.models import tokenizer
 from openpi.training import vl_data
 
 
@@ -20,6 +22,19 @@ def test_vl_samples_fill_the_base_camera_and_learn_no_actions(tmp_path):
     assert not sample["action_loss_mask"]
     assert sample["actions"].shape == (50, 7)
     assert (sample["prompt"], sample["annotation"]) == ("detect cup", "<loc0001>" * 4)
+
+
+def test_a_vl_prompt_carries_no_state_where_robot_prompts_do(tmp_path):
+    (tmp_path / "images").mkdir()
+    Image.fromarray(np.zeros((8, 8, 3), np.uint8)).save(tmp_path / "images" / "a.jpg")
+    (tmp_path / "samples.jsonl").write_text(
+        json.dumps({"image": "images/a.jpg", "prompt": "detect cup", "target": "<loc0001>" * 4}) + "\n"
+    )
+    paligemma = tokenizer.PaligemmaTokenizer(max_len=64)
+    tokenize = transforms.TokenizePrompt(paligemma, discrete_state_input=True)
+    sample = tokenize(vl_data.VLInputs(action_horizon=4, action_dim=7)(vl_data.VLDataset(tmp_path)[0]))
+    ids = sample["tokenized_prompt"][sample["tokenized_prompt_mask"]].tolist()
+    assert paligemma._tokenizer.decode(ids) == "Task: detect cup;\nAction: "  # noqa: SLF001
 
 
 def test_mixed_dataset_draws_about_its_share_from_the_vl_data():

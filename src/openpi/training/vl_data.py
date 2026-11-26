@@ -32,7 +32,8 @@ class VLDataset(torch.utils.data.Dataset):
 @dataclasses.dataclass(frozen=True)
 class VLInputs(transforms.DataTransformFn):
     """A vision-language sample as rena's model inputs: its image in the base camera's slot, the other cameras blank and
-    masked out, zero state and actions that action_loss_mask keeps out of the flow and stage losses."""
+    masked out, zero state and actions that action_loss_mask keeps out of the flow and stage losses; the state is left
+    out of the prompt, as it is of the robot frames state dropout drops."""
 
     action_horizon: int
     action_dim: int
@@ -48,6 +49,7 @@ class VLInputs(transforms.DataTransformFn):
             "actions": np.zeros((self.action_horizon, self.action_dim), np.float32),
             "task_stage": np.int32(0),
             "action_loss_mask": np.False_,
+            "drop_state": True,
             "prompt": data["prompt"],
             "annotation": data["annotation"],
         }
