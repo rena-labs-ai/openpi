@@ -1066,9 +1066,9 @@ _CONFIGS = [
         repo_id="rena/rena_autolabel_v4_interp",
         site_holdout=TORONTO,
         targets="cotrain",
-        vl_datasets=("vl/refcoco", "vl/robopoint_object", "vl/robopoint_region"),
+        vl_datasets=("vl/refcoco", "vl/robopoint_object", "vl/robopoint_region", "vl/rena_inventory"),
         vl_share=0.1,
-        vl_weights=(0.5, 0.25, 0.25),
+        vl_weights=(0.45, 0.24, 0.24, 0.07),
         lora=True,
     ),
     #
