@@ -157,7 +157,8 @@ def main(
             (out / name / f"{short}.json").write_text(json.dumps({"summary": summary, "samples": results}, indent=1))
             grid(tiles).save(out / name / f"{short}.png")
             print(json.dumps(summary))
-        del model
+        del model, decode  # the jitted decoder holds the weights too
+        jax.clear_caches()
 
 
 if __name__ == "__main__":
