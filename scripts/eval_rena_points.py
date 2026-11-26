@@ -81,7 +81,9 @@ def load_model(config: _config.TrainConfig, checkpoint: str):
         graphdef, state = nnx.split(model)
         state.replace_by_pure_dict(config.weight_loader.load(state.to_pure_dict()))
         return nnx.merge(graphdef, state)
-    return config.model.load(_model.restore_params(pathlib.Path(checkpoint) / "params", dtype=jnp.bfloat16))
+    # on the host: Model.load initializes the whole model on the device before putting these in its place
+    params = _model.restore_params(pathlib.Path(checkpoint) / "params", restore_type=np.ndarray, dtype=jnp.bfloat16)
+    return config.model.load(params)
 
 
 def main(
