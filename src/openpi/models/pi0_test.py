@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 
 from openpi.models import model as _model
+from openpi.models.pi0 import LOC0
 from openpi.models.pi0 import ki_masks
 from openpi.models.pi0 import masked_mean_pool
 from openpi.models.pi0 import stage_ce_and_acc
@@ -251,3 +252,25 @@ def test_stage_loss_counts_only_the_samples_with_actions():
     want_ce, want_acc = stage_ce_and_acc(logits[:1], jnp.array([0]))
     assert jnp.allclose(ce, want_ce)
     assert acc == want_acc == 1.0
+
+
+def test_each_decoded_loc_is_the_one_the_target_loss_finds_likeliest_after_the_ones_before_it(ki):
+    _, model, obs = ki
+    bins = np.asarray(model.decode_locs(obs))
+    assert bins.shape == (2, 4)
+    assert ((bins >= 0) & (bins < 1024)).all()
+    act = jnp.zeros((2, model.action_horizon, model.action_dim))
+
+    def ce(tokens, upto):
+        o = dataclasses.replace(
+            obs,
+            target_tokens=jnp.asarray(tokens + LOC0, jnp.int32),
+            target_mask=jnp.broadcast_to(jnp.arange(4) <= upto, (2, 4)),
+        )
+        return float(model.compute_target_loss(jax.random.key(0), o, act)[1])
+
+    for i in range(4):
+        for other in (0, 511, 1023, 77):
+            swapped = bins.copy()
+            swapped[:, i] = other
+            assert ce(bins, i) <= ce(swapped, i) + 1e-6
