@@ -1035,10 +1035,11 @@ _CONFIGS = [
                     "repo_id": "rena/rena_autolabel_v4_interp",
                     "site_holdout": TORONTO,
                     "targets": "cotrain",
-                    "vl_datasets": ("vl/refcoco", "vl/robopoint_object", "vl/robopoint_region"),
+                    "vl_datasets": ("vl/refcoco", "vl/robopoint_object", "vl/robopoint_region", "vl/rena_inventory"),
                     "vl_share": 0.1,
-                    # boxes as rena's annotations give them, then points on objects and on free space
-                    "vl_weights": (0.5, 0.25, 0.25),
+                    # boxes as rena's annotations give them, points on objects and on free space, and our own scenes'
+                    # objects by argus's names (few, so about three passes over them)
+                    "vl_weights": (0.45, 0.24, 0.24, 0.07),
                 },
             ),
         )
