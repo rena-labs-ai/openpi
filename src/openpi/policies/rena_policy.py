@@ -161,7 +161,9 @@ class AutolabelPrompt(transforms.DataTransformFn):
     target's box per camera), and with probability state_dropout the state left out of the prompt (TokenizePrompt's
     drop_state). boxes_in "text" writes the boxes into the prompt as PaliGemma <loc> tokens, "image" passes them as
     target_boxes for RenaInputs to draw, "none" never draws a box prompt: the skill prompt takes its share. With
-    annotate, the frame's annotation for knowledge insulation's target, with the boxes only when the prompt gives none.
+    annotate, the frame's annotation for the backbone's target, with the boxes only when the prompt gives none; with
+    state_in_prompt as well, only on frames whose prompt leaves the state out, since pi05_base answers a prompt that
+    carries the state with actions, not language.
     It is a repack transform, so it never runs at serving time.
 
     autolabel_prompts (rena-autolabel/packages/autolabel-prompts) and rena_task_grammar must be importable."""
@@ -172,6 +174,7 @@ class AutolabelPrompt(transforms.DataTransformFn):
     # Fixes each frame's draw, for evaluations that must give every model the same prompts.
     seed: int | None = None
     annotate: bool = False
+    state_in_prompt: bool = False
 
     @functools.cached_property
     def _records(self) -> dict[int, dict]:
@@ -207,6 +210,8 @@ class AutolabelPrompt(transforms.DataTransformFn):
                 "" if rec is None else annotation(rec, frame, boxes=not boxes, names=names, prompt=text)
             )
         data["drop_state"] = bool(rng.random() < self.state_dropout)
+        if self.annotate and self.state_in_prompt and not data["drop_state"]:
+            data["annotation"] = ""
         return data
 
 

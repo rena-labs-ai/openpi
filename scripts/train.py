@@ -236,19 +236,23 @@ def saved_model(state: training_utils.TrainState) -> _model.BaseModel:
 
 
 def holdout_step(
-    config: _config.TrainConfig, state: training_utils.TrainState, batch: dict, rng: at.KeyArrayLike
+    config: _config.TrainConfig,
+    state: training_utils.TrainState,
+    batch: dict,
+    language_batch: dict,
+    rng: at.KeyArrayLike,
 ) -> tuple[at.Array, at.Array | None, at.Array]:
-    """A holdout batch's flow loss [b, horizon], its target tokens' cross-entropy when the model learns them, and
-    sampled actions [b, horizon, dim]."""
+    """A holdout batch's flow loss [b, horizon], its language prompts' target cross-entropy when the model learns
+    targets, and sampled actions [b, horizon, dim]."""
     model = saved_model(state)
     observation = _model.Observation.from_dict(batch)
     loss_rng, sample_rng = jax.random.split(rng)
+    flow = model.compute_loss(loss_rng, observation, batch["actions"], train=False)
     target_ce = None
     if isinstance(config.model, _pi0_config.Pi0Config) and config.model.language_targets:
-        flow, nll, _ = model.compute_target_loss(loss_rng, observation, batch["actions"], train=False)
-        target_ce = _pi0.target_ce(nll, observation.target_mask)
-    else:
-        flow = model.compute_loss(loss_rng, observation, batch["actions"], train=False)
+        language = _model.Observation.from_dict(language_batch)
+        _, nll, _ = model.compute_target_loss(loss_rng, language, language_batch["actions"], train=False)
+        target_ce = _pi0.target_ce(nll, language.target_mask)
     return flow, target_ce, model.sample_actions(sample_rng, observation, num_steps=10)
 
 
@@ -293,9 +297,11 @@ def holdout_scores(
     per chunk step; and its showcase frames' chunks plotted against the commanded ones."""
     rngs = jax.random.split(jax.random.key(0), len(holdout.batches))
     flows, ces, predicted = [], [], []
-    for r, b in zip(rngs, holdout.batches, strict=True):
+    for r, b, lb in zip(rngs, holdout.batches, holdout.language_batches, strict=True):
         with sharding.set_mesh(mesh):
-            flow, ce, actions = pholdout_step(state, jax.device_put(b, data_sharding), r)
+            flow, ce, actions = pholdout_step(
+                state, jax.device_put(b, data_sharding), jax.device_put(lb, data_sharding), r
+            )
         flows.append(np.asarray(flow))
         ces.append(ce)
         predicted.append(np.asarray(actions))

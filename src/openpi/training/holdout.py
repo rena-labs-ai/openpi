@@ -5,6 +5,7 @@ scripts/eval_rena_holdout.py scores checkpoints with it, and training scores its
 
 import collections
 from collections.abc import Callable
+import copy
 import dataclasses
 import json
 import pathlib
@@ -22,6 +23,9 @@ import openpi.transforms as _transforms
 @dataclasses.dataclass
 class Holdout:
     batches: list[dict]  # model inputs as training's data loader makes them, before Observation.from_dict
+    # the same frames prompted as the backbone's language targets are: without the state where the model puts it in the
+    # prompt (rena_policy.AutolabelPrompt.state_in_prompt), else the batches themselves
+    language_batches: list[dict]
     want: np.ndarray  # [n, horizon, 7] the commanded joint targets and gripper
     kinds: list[str]  # the prompt each frame got: task, skill or boxes
     sources: list[str]  # the recording's dataset
@@ -154,22 +158,31 @@ def load(
     """Evenly spread frames of the config's holdout (or of its train part), at most max_frames, in whole batches."""
     factory = dataclasses.replace(config.data, split=split)
     data_config = factory.create(config.assets_dirs, config.model)
-    repack = [
-        # the state in every prompt, as a robot sends it
-        dataclasses.replace(t, seed=seed, state_dropout=0.0) if isinstance(t, rena_policy.AutolabelPrompt) else t
-        for t in data_config.repack_transforms.inputs
-    ]
-    prompter = next(t for t in repack if isinstance(t, rena_policy.AutolabelPrompt))
+
+    def inputs_with(state_dropout: float):
+        repack = [
+            dataclasses.replace(t, seed=seed, state_dropout=state_dropout)
+            if isinstance(t, rena_policy.AutolabelPrompt)
+            else t
+            for t in data_config.repack_transforms.inputs
+        ]
+        return _transforms.compose(
+            [
+                *repack,
+                *data_config.data_transforms.inputs,
+                _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
+                *data_config.model_transforms.inputs,
+            ]
+        )
+
+    prompter = dataclasses.replace(
+        next(t for t in data_config.repack_transforms.inputs if isinstance(t, rena_policy.AutolabelPrompt)), seed=seed
+    )
     lines = pathlib.Path(prompter.labels_path).read_text().splitlines()
     records = {(rec := json.loads(line))["episode_index"]: rec for line in lines}
-    inputs = _transforms.compose(
-        [
-            *repack,
-            *data_config.data_transforms.inputs,
-            _transforms.Normalize(norm_stats, use_quantiles=data_config.use_quantile_norm),
-            *data_config.model_transforms.inputs,
-        ]
-    )
+    inputs = inputs_with(0.0)  # the state in every prompt, as a robot sends it
+    language = prompter.annotate and prompter.state_in_prompt
+    language_inputs = inputs_with(1.0)
     outputs = _transforms.compose(
         [
             *data_config.model_transforms.outputs,
@@ -183,7 +196,7 @@ def load(
     if n == 0:  # fewer frames than one batch
         return None
     picks = np.linspace(0, len(dataset) - 1, n).round().astype(int)
-    samples, want, kinds, sources = [], [], [], []
+    samples, language_samples, want, kinds, sources = [], [], [], [], []
     for i in picks:
         raw = dataset[int(i)]
         # before the inputs run: DeltaActions subtracts in place, on memory np.asarray shares with the tensor
@@ -191,9 +204,15 @@ def load(
         rec = records[int(raw["episode_index"])]
         kinds.append(prompt_kind(prompter, rec, int(raw["frame_index"])))
         sources.append(rec["dataset"])
+        if language:
+            language_samples.append(language_inputs(copy.deepcopy(dict(raw))))
         samples.append(inputs(dict(raw)))
-    batches = [jax.tree.map(lambda *x: np.stack(x), *samples[s : s + batch_size]) for s in range(0, n, batch_size)]
-    return Holdout(batches, np.stack(want), kinds, sources, outputs)
+
+    def batched(xs):
+        return [jax.tree.map(lambda *x: np.stack(x), *xs[s : s + batch_size]) for s in range(0, n, batch_size)]
+
+    batches = batched(samples)
+    return Holdout(batches, batched(language_samples) if language else batches, np.stack(want), kinds, sources, outputs)
 
 
 @dataclasses.dataclass

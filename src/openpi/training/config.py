@@ -443,6 +443,7 @@ class LeRobotRenaDataConfig(DataConfigFactory):
                     state_dropout=self.state_dropout,
                     boxes_in=self.boxes_in,
                     annotate=targets,
+                    state_in_prompt=model_config.discrete_state_input,
                 ),
                 *([rena_policy.SplitPrevAction()] if command else []),
             ]

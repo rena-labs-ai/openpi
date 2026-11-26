@@ -170,3 +170,21 @@ def test_annotation_names_the_object_as_the_instruction_does_about_half_the_time
     skills = [o["annotation"].split("; ")[-1] for o in outs if "pick up" in o["annotation"]]
     assert set(skills) == {"pick up the plush toy", "pick up the white plush lamb toy"}
     assert 0.25 < skills.count("pick up the plush toy") / len(skills) < 0.75
+
+
+def test_with_the_state_in_the_prompt_only_frames_whose_prompt_leaves_it_out_keep_their_annotation(tmp_path):
+    pytest.importorskip("autolabel_prompts")
+    labels = tmp_path / "autolabel.jsonl"
+    labels.write_text(json.dumps(_labels()) + "\n")
+
+    def outs(**kw):
+        prompter = rena_policy.AutolabelPrompt(str(labels), boxes_in="image", annotate=True, seed=0, **kw)
+        return [prompter({"episode_index": 3, "frame_index": f, "prompt": "task"}) for f in range(10, 60)]
+
+    plain = outs(state_dropout=0.5)
+    gated = outs(state_dropout=0.5, state_in_prompt=True)
+    assert [o["prompt"] for o in gated] == [o["prompt"] for o in plain]
+    assert all(g["annotation"] == "" for g in gated if not g["drop_state"])
+    assert [g["annotation"] for g in gated if g["drop_state"]] == [p["annotation"] for p in plain if p["drop_state"]]
+    assert any(g["annotation"] for g in gated)
+    assert any(not g["drop_state"] for g in gated)
