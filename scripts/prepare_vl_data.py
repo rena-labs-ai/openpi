@@ -6,6 +6,13 @@ the model's square input (autolabel_prompts.loc_box), four per box and two (y, x
     uv run scripts/prepare_vl_data.py --source robopoint --annotations robopoint_1432k.json --images IMAGES_DIR \
         --out OUT --kind object_ref [--limit N]
 
+Two point evaluation sets with the answer's mask (samples' "mask", saved beside the image at its size) and no target:
+RoboPoint's Where2Place (free space) and RoboRefIt (objects, its testB parquet shards):
+
+    uv run scripts/prepare_vl_data.py --source where2place --annotations WHERE2PLACE_DIR --images WHERE2PLACE_DIR --out OUT
+    uv run scripts/prepare_vl_data.py --source roborefit --annotations TESTB_SHARDS_DIR --images TESTB_SHARDS_DIR \
+        --out OUT --limit 400
+
 Images are saved with their longest side at most --max-side pixels; boxes and points are fractions, so they hold.
 """
 
@@ -29,6 +36,68 @@ def save_image(src: pathlib.Path, out: pathlib.Path, name: str, max_side: int) -
     (out / "images").mkdir(parents=True, exist_ok=True)
     image.save(out / "images" / name, quality=90)
     return image.size
+
+
+def save_mask(mask: Image.Image, out: pathlib.Path, name: str, size: tuple[int, int]) -> str:
+    """The mask as a 0/255 PNG at the saved image's size, under out/masks."""
+    (out / "masks").mkdir(parents=True, exist_ok=True)
+    mask.resize(size, Image.NEAREST).save(out / "masks" / name)
+    return f"masks/{name}"
+
+
+def where2place(root: pathlib.Path, out: pathlib.Path, max_side: int) -> list[dict]:
+    """Its 100 free-space questions, without the answer-format sentence, as RoboPoint's training prompts are."""
+    samples = []
+    for line in (root / "point_questions.jsonl").read_text().splitlines():
+        q = json.loads(line)
+        name = q["image"]
+        size = save_image(root / "images" / name, out, name, max_side)
+        stem = root / "masks" / pathlib.Path(name).stem
+        # most masks are PNGs, a few only JPEGs, whose compression blurs the edge
+        src = stem.with_suffix(".png") if stem.with_suffix(".png").exists() else stem.with_suffix(".jpg")
+        mask = Image.fromarray((np.asarray(Image.open(src).convert("L")) > 127).astype(np.uint8) * 255)
+        samples.append(
+            {
+                "image": f"images/{name}",
+                "prompt": q["text"].split(" Your answer should be formatted")[0],
+                "target": "",
+                "mask": save_mask(mask, out, pathlib.Path(name).with_suffix(".png").name, size),
+                "category": q["category"],
+            }
+        )
+    return samples
+
+
+def roborefit(shards: pathlib.Path, out: pathlib.Path, limit: int, max_side: int, seed: int) -> list[dict]:
+    """Evenly spread expressions from the testB shards, each asking for points on the object it means; the mask is any
+    nonzero channel of RoboRefIt's."""
+    import io
+
+    rows = pd.concat([pd.read_parquet(f) for f in sorted(shards.glob("testB-*.parquet"))], ignore_index=True)
+    rows = rows.sample(n=min(limit, len(rows)), random_state=seed).sort_values("sample_id")
+    samples = []
+    for _, r in tqdm.tqdm(rows.iterrows(), total=len(rows)):
+        name = f"{r['sample_id']}.jpg"
+        image = Image.open(io.BytesIO(r["image"]["bytes"])).convert("RGB")
+        image.thumbnail((max_side, max_side))
+        (out / "images").mkdir(parents=True, exist_ok=True)
+        image.save(out / "images" / name, quality=90)
+        mask = Image.fromarray(
+            (
+                np.asarray(Image.open(io.BytesIO(r["mask"]["bytes"]))).reshape(r["height"], r["width"], -1).max(-1) > 0
+            ).astype(np.uint8)
+            * 255
+        )
+        samples.append(
+            {
+                "image": f"images/{name}",
+                "prompt": f'Locate several points on the item meant by "{r["expression"]}".',
+                "target": "",
+                "mask": save_mask(mask, out, f"{r['sample_id']}.png", image.size),
+                "category": r["category"],
+            }
+        )
+    return samples
 
 
 def loc_point(x: float, y: float, size: tuple[int, int]) -> str:
@@ -105,8 +174,12 @@ def main(
         samples = refcoco(annotations, images, out, limit, max_side, seed)
     elif source == "robopoint":
         samples = robopoint(annotations, images, out, kind, limit, max_side, seed)
+    elif source == "where2place":
+        samples = where2place(annotations, out, max_side)
+    elif source == "roborefit":
+        samples = roborefit(annotations, out, limit, max_side, seed)
     else:
-        raise SystemExit(f"unknown source {source}: refcoco or robopoint")
+        raise SystemExit(f"unknown source {source}: refcoco, robopoint, where2place or roborefit")
     (out / "samples.jsonl").write_text("".join(json.dumps(s) + "\n" for s in samples))
     print(f"{len(samples)} samples -> {out}")
 
