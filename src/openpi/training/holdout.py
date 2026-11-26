@@ -119,3 +119,60 @@ def load(
         samples.append(inputs(dict(raw)))
     batches = [jax.tree.map(lambda *x: np.stack(x), *samples[s : s + batch_size]) for s in range(0, n, batch_size)]
     return Holdout(batches, np.stack(want), kinds, sources, outputs)
+
+
+@dataclasses.dataclass
+class Detect:
+    """Held-out "detect <name>" frames (a vision-language dataset such as vl/rena_inventory_toronto) as model inputs,
+    with the box each one's target gives, in <loc> bins."""
+
+    batches: list[dict]
+    want: np.ndarray  # [n, 4] y0 x0 y1 x1, bins 0-1023 over the padded square input
+    prompts: list[str]
+
+
+def load_detect(name: str, data_config: _config.DataConfig, action_horizon: int, *, batch_size: int) -> Detect | None:
+    """All of the dataset's frames that fill whole batches."""
+    from lerobot.common.constants import HF_LEROBOT_HOME
+
+    from openpi.models.pi0 import LOC0
+    from openpi.training import vl_data
+
+    raw = vl_data.VLDataset(HF_LEROBOT_HOME / name)
+    dataset = _data_loader.vl_dataset(name, data_config, action_horizon)
+    n = len(dataset) - len(dataset) % batch_size
+    if n == 0:
+        return None
+    samples = [dataset[i] for i in range(n)]
+    want = np.stack([s["target_tokens"][:4] - LOC0 for s in samples])
+    batches = [jax.tree.map(lambda *x: np.stack(x), *samples[s : s + batch_size]) for s in range(0, n, batch_size)]
+    return Detect(batches, want, [s["prompt"] for s in raw.samples[:n]])
+
+
+def box_iou(a: np.ndarray, b: np.ndarray) -> np.ndarray:
+    """[n] intersection over union of boxes [n, 4] given as y0 x0 y1 x1; 0 for a box with no area."""
+    y0, x0 = np.maximum(a[:, 0], b[:, 0]), np.maximum(a[:, 1], b[:, 1])
+    y1, x1 = np.minimum(a[:, 2], b[:, 2]), np.minimum(a[:, 3], b[:, 3])
+    inter = np.clip(y1 - y0, 0, None) * np.clip(x1 - x0, 0, None)
+
+    def area(c):
+        return np.clip(c[:, 2] - c[:, 0], 0, None) * np.clip(c[:, 3] - c[:, 1], 0, None)
+
+    union = area(a) + area(b) - inter
+    return np.where(union > 0, inter / np.maximum(union, 1e-9), 0.0)
+
+
+def draw_boxes(image: np.ndarray, want: np.ndarray, got: np.ndarray) -> np.ndarray:
+    """The model's input image (uint8, or float in [-1, 1]) with the target box in green and the predicted in red."""
+    from PIL import Image
+    from PIL import ImageDraw
+
+    if image.dtype != np.uint8:
+        image = ((np.asarray(image, np.float32) + 1) * 127.5).clip(0, 255).astype(np.uint8)
+    pil = Image.fromarray(image)
+    h, w = image.shape[:2]
+    draw = ImageDraw.Draw(pil)
+    for box, colour in ((want, (0, 255, 0)), (got, (255, 0, 0))):
+        y0, x0, y1, x1 = (np.asarray(box, np.float32) / 1024) * np.array([h, w, h, w])
+        draw.rectangle([x0, y0, max(x0, x1), max(y0, y1)], outline=colour, width=2)
+    return np.asarray(pil)

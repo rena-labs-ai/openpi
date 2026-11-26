@@ -18,13 +18,13 @@ from openpi.policies import rena_policy
 class VLDataset(torch.utils.data.Dataset):
     def __init__(self, root: pathlib.Path):
         self._root = root
-        self._samples = [json.loads(line) for line in (root / "samples.jsonl").read_text().splitlines() if line]
+        self.samples = [json.loads(line) for line in (root / "samples.jsonl").read_text().splitlines() if line]
 
     def __len__(self) -> int:
-        return len(self._samples)
+        return len(self.samples)
 
     def __getitem__(self, index: int) -> dict:
-        sample = self._samples[index]
+        sample = self.samples[index]
         image = np.asarray(Image.open(self._root / sample["image"]).convert("RGB"))
         return {"image": image, "prompt": sample["prompt"], "annotation": sample["target"]}
 

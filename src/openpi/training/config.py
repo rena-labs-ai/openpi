@@ -673,6 +673,9 @@ class TrainConfig:
     # 0 for none. The holdout is at most holdout_frames frames, spread evenly over it.
     holdout_interval: int = 0
     holdout_frames: int = 512
+    # Vision-language datasets of "detect <name>" frames scored with the holdout: the target's cross-entropy and the
+    # greedily decoded box against the target's (training.holdout.Detect).
+    detect_holdouts: Sequence[str] = ()
 
     # If true, will overwrite the checkpoint directory if it already exists.
     overwrite: bool = False
@@ -775,6 +778,7 @@ def _rena(
         stage_loss_weight=0.03,
         target_loss_weight=0.02 if targets == "cotrain" else 1.0,
         holdout_interval=1000 if split == "train" else 0,
+        detect_holdouts=("vl/rena_inventory_toronto", "vl/rena_inventory_holdout") if targets != "none" else (),
         fsdp_devices=4,
         num_workers=8,
     )

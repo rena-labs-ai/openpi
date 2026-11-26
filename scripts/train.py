@@ -217,15 +217,61 @@ def train_step(
     return new_state, info
 
 
-def holdout_step(state: training_utils.TrainState, batch: dict, rng: at.KeyArrayLike) -> tuple[at.Array, at.Array]:
-    """The weights a checkpoint saves (the EMA when there is one) on a holdout batch: the flow loss [b, horizon] and
-    sampled actions [b, horizon, dim]."""
+def saved_model(state: training_utils.TrainState) -> _model.BaseModel:
+    """The weights a checkpoint saves: the EMA when there is one."""
     model = nnx.merge(state.model_def, state.params if state.ema_params is None else state.ema_params)
     model.eval()
+    return model
+
+
+def holdout_step(
+    config: _config.TrainConfig, state: training_utils.TrainState, batch: dict, rng: at.KeyArrayLike
+) -> tuple[at.Array, at.Array | None, at.Array]:
+    """A holdout batch's flow loss [b, horizon], its target tokens' cross-entropy when the model learns them, and
+    sampled actions [b, horizon, dim]."""
+    model = saved_model(state)
     observation = _model.Observation.from_dict(batch)
     loss_rng, sample_rng = jax.random.split(rng)
-    flow = model.compute_loss(loss_rng, observation, batch["actions"], train=False)
-    return flow, model.sample_actions(sample_rng, observation, num_steps=10)
+    target_ce = None
+    if isinstance(config.model, _pi0_config.Pi0Config) and config.model.language_targets:
+        flow, target_ce, _ = model.compute_target_loss(loss_rng, observation, batch["actions"], train=False)
+    else:
+        flow = model.compute_loss(loss_rng, observation, batch["actions"], train=False)
+    return flow, target_ce, model.sample_actions(sample_rng, observation, num_steps=10)
+
+
+def detect_step(state: training_utils.TrainState, batch: dict, rng: at.KeyArrayLike) -> tuple[at.Array, at.Array]:
+    """A detect batch's target cross-entropy and greedily decoded boxes [b, 4] in <loc> bins."""
+    model = saved_model(state)
+    observation = _model.Observation.from_dict(batch)
+    _, target_ce, _ = model.compute_target_loss(rng, observation, batch["actions"], train=False)
+    return target_ce, model.decode_locs(observation)
+
+
+def detect_scores(
+    detect: _holdout.Detect, pdetect_step, state: training_utils.TrainState, data_sharding, mesh, prefix: str
+) -> tuple[dict[str, float], list[wandb.Image]]:
+    """The detect frames' target cross-entropy, box IoU and share of boxes at IoU 0.5 or more, and the first 16 frames
+    drawn with the target box (green) and the decoded one (red)."""
+    ces, got = [], []
+    for b in detect.batches:
+        with sharding.set_mesh(mesh):
+            ce, bins = pdetect_step(state, jax.device_put(b, data_sharding), jax.random.key(0))
+        ces.append(float(ce))
+        got.append(np.asarray(bins))
+    got = np.concatenate(got)
+    iou = _holdout.box_iou(got, detect.want)
+    scores = {
+        f"{prefix}/target_ce": float(np.mean(ces)),
+        f"{prefix}/box_iou": float(iou.mean()),
+        f"{prefix}/box_acc50": float((iou >= 0.5).mean()),
+    }
+    images = np.concatenate([b["image"]["base_0_rgb"] for b in detect.batches])[:16]
+    drawn = [
+        wandb.Image(_holdout.draw_boxes(im, detect.want[i], got[i]), caption=f"{detect.prompts[i]} (IoU {iou[i]:.2f})")
+        for i, im in enumerate(images)
+    ]
+    return scores, drawn
 
 
 def holdout_scores(
@@ -233,15 +279,18 @@ def holdout_scores(
 ) -> dict[str, float]:
     """The holdout's flow loss and sampled-action errors, with the same noise and flow times every time."""
     rngs = jax.random.split(jax.random.key(0), len(holdout.batches))
-    flows, predicted = [], []
+    flows, ces, predicted = [], [], []
     for r, b in zip(rngs, holdout.batches, strict=True):
         with sharding.set_mesh(mesh):
-            flow, actions = pholdout_step(state, jax.device_put(b, data_sharding), r)
+            flow, ce, actions = pholdout_step(state, jax.device_put(b, data_sharding), r)
         flows.append(np.asarray(flow))
+        ces.append(ce)
         predicted.append(np.asarray(actions))
     flow = np.concatenate(flows)
     report = holdout.report(holdout.errors(predicted))
     scores = {f"{prefix}/flow_loss": float(flow.mean()), f"{prefix}/gripper_mae": report["all"]["gripper_mae"]}
+    if ces[0] is not None:
+        scores[f"{prefix}/target_ce"] = float(np.mean([float(c) for c in ces]))
     for group, summary in {"all": report["all"], **report["by_prompt"]}.items():
         suffix = "" if group == "all" else f"_{group}"
         scores[f"{prefix}/joint_mae{suffix}"] = summary["joint_mae"]
@@ -314,7 +363,7 @@ def main(config: _config.TrainConfig):
         out_shardings=(train_state_sharding, replicated_sharding),
         donate_argnums=(1,),
     )
-    holdouts = {}
+    holdouts, detects = {}, {}
     if config.holdout_interval:
         splits = ("holdout", "site") if getattr(config.data, "site_holdout", ()) else ("holdout",)
         for split in splits:
@@ -330,7 +379,17 @@ def main(config: _config.TrainConfig):
                 continue
             holdouts[split] = holdout
             logging.info(f"{split}: {len(holdout.want)} frames, scored every {config.holdout_interval} steps")
-        pholdout_step = jax.jit(holdout_step)
+        pholdout_step = jax.jit(functools.partial(holdout_step, config))
+        for name in config.detect_holdouts:
+            detect = _holdout.load_detect(
+                name, data_loader.data_config(), config.model.action_horizon, batch_size=config.batch_size
+            )
+            if detect is None:
+                logging.warning(f"{name}: fewer frames than one batch of {config.batch_size}, not scored")
+                continue
+            detects[name.split("/")[-1]] = detect
+            logging.info(f"{name}: {len(detect.want)} detect frames, scored every {config.holdout_interval} steps")
+        pdetect_step = jax.jit(detect_step)
     lr_schedule = config.lr_schedule.create()
 
     start_step = int(train_state.step)
@@ -361,11 +420,15 @@ def main(config: _config.TrainConfig):
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []
-        if holdouts and (step % config.holdout_interval == 0 or step == config.num_train_steps - 1):
+        if (holdouts or detects) and (step % config.holdout_interval == 0 or step == config.num_train_steps - 1):
             scoring_start = time.monotonic()
             scores = {}
             for split, holdout in holdouts.items():
                 scores |= holdout_scores(holdout, pholdout_step, train_state, data_sharding, mesh, split)
+            for name, detect in detects.items():
+                got, drawn = detect_scores(detect, pdetect_step, train_state, data_sharding, mesh, name)
+                scores |= got
+                wandb.log({f"{name}/boxes": drawn}, step=step)
             pbar.write(f"Step {step}: " + ", ".join(f"{k}={v:.4f}" for k, v in scores.items()))
             wandb.log(scores, step=step)
             interval_start += time.monotonic() - scoring_start  # not training time
