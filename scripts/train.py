@@ -164,8 +164,8 @@ def train_step(
             aux = {}
         else:
             chunked_loss = model.compute_loss(rng, observation, actions, train=True)
-            return jnp.mean(chunked_loss), flow_by_step(chunked_loss)
-        aux |= {"flow_loss": flow, **flow_by_step(chunked_loss)}
+            return jnp.mean(chunked_loss), {}
+        aux |= {"flow_loss": flow}
         if config.stage_loss_weight:
             ce, acc = _pi0.stage_ce_and_acc(stage_logits, observation.task_stage, acts)
             aux |= {"stage_loss": ce, "stage_acc": acc}
@@ -217,17 +217,6 @@ def train_step(
     return new_state, info
 
 
-def flow_by_step(chunked_loss: at.Array) -> dict[str, at.Array]:
-    """The flow loss [b, horizon] over the steps a robot executes and over the rest of the chunk; nothing for a loss
-    that is one value per sample, as FAST models give."""
-    if chunked_loss.ndim != 2:
-        return {}
-    return {
-        "flow_loss_executed": jnp.mean(chunked_loss[:, : _holdout.EXECUTED]),
-        "flow_loss_rest": jnp.mean(chunked_loss[:, _holdout.EXECUTED :]),
-    }
-
-
 def holdout_step(state: training_utils.TrainState, batch: dict, rng: at.KeyArrayLike) -> tuple[at.Array, at.Array]:
     """The weights a checkpoint saves (the EMA when there is one) on a holdout batch: the flow loss [b, horizon] and
     sampled actions [b, horizon, dim]."""
@@ -252,17 +241,10 @@ def holdout_scores(
         predicted.append(np.asarray(actions))
     flow = np.concatenate(flows)
     report = holdout.report(holdout.errors(predicted))
-    scores = {
-        f"{prefix}/flow_loss": float(flow.mean()),
-        f"{prefix}/flow_loss_executed": float(flow[:, : _holdout.EXECUTED].mean()),
-        f"{prefix}/flow_loss_rest": float(flow[:, _holdout.EXECUTED :].mean()),
-    }
+    scores = {f"{prefix}/flow_loss": float(flow.mean()), f"{prefix}/gripper_mae": report["all"]["gripper_mae"]}
     for group, summary in {"all": report["all"], **report["by_prompt"]}.items():
         suffix = "" if group == "all" else f"_{group}"
-        scores[f"{prefix}/joint_mae_executed{suffix}"] = summary["joint_mae_executed"]
-    scores[f"{prefix}/joint_mae_chunk"] = report["all"]["joint_mae_chunk"]
-    scores[f"{prefix}/joint_mae_first_step"] = report["all"]["joint_mae_by_step"][0]
-    scores[f"{prefix}/gripper_mae_executed"] = report["all"]["gripper_mae_executed"]
+        scores[f"{prefix}/joint_mae{suffix}"] = summary["joint_mae"]
     return scores
 
 

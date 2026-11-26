@@ -18,8 +18,6 @@ import openpi.training.config as _config
 import openpi.training.data_loader as _data_loader
 import openpi.transforms as _transforms
 
-EXECUTED = 10  # the steps of a chunk a robot runs before it asks again
-
 
 @dataclasses.dataclass
 class Holdout:
@@ -51,10 +49,9 @@ def summary(err: np.ndarray) -> dict:
     """err [n, horizon, 7]: joints in rad, the gripper in its 0-1 range."""
     return {
         "n": len(err),
-        "joint_mae_executed": float(err[:, :EXECUTED, :6].mean()),
-        "joint_mae_chunk": float(err[:, :, :6].mean()),
-        "joint_mae_executed_per_joint": err[:, :EXECUTED, :6].mean((0, 1)).round(4).tolist(),
-        "gripper_mae_executed": float(err[:, :EXECUTED, 6].mean()),
+        "joint_mae": float(err[..., :6].mean()),
+        "joint_mae_per_joint": err[..., :6].mean((0, 1)).round(4).tolist(),
+        "gripper_mae": float(err[..., 6].mean()),
         "joint_mae_by_step": err[:, :, :6].mean((0, 2)).round(4).tolist(),
     }
 

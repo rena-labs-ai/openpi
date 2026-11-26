@@ -30,8 +30,7 @@ SPLITS = ("train", "holdout")
 
 
 def frame_errors(model, batch: dict, noise: jax.Array, t: jax.Array, dims: int) -> jax.Array:
-    """[b, 3]: each frame's squared v error at time t, over the real dims, over the real dims of the executed steps,
-    and over all dims."""
+    """[b, 2]: each frame's squared v error at time t, over the real dims and over all dims."""
     observation = _model.preprocess_observation(None, _model.Observation.from_dict(batch), train=False)
     actions = batch["actions"]
     x_t = t * noise + (1 - t) * actions
@@ -41,7 +40,6 @@ def frame_errors(model, batch: dict, noise: jax.Array, t: jax.Array, dims: int) 
     return jnp.stack(
         [
             err[..., :dims].mean((1, 2)),
-            err[:, : _holdout.EXECUTED, :dims].mean((1, 2)),
             err.mean((1, 2)),
         ],
         axis=-1,
@@ -98,8 +96,8 @@ def main(
                     for t in TIMES
                 ],
                 axis=1,
-            )  # [frames, times, 3]
-            out |= {f"{s}_v": got[..., 0], f"{s}_v_executed": got[..., 1], f"{s}_v_all32": got[..., 2]}
+            )  # [frames, times, 2]
+            out |= {f"{s}_v": got[..., 0], f"{s}_v_all32": got[..., 1]}
             out[f"{s}_kinds"] = np.array(data[s].kinds)
         np.savez(out_dir / f"{ckpt.name}.npz", **out)
         print(ckpt, "mean v error per t:")

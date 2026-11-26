@@ -55,8 +55,7 @@ def main(
     out.write_text(json.dumps(res, indent=1))
     a = res["all"]
     print(
-        f"{a['n']} frames: joint MAE {a['joint_mae_executed']:.4f} rad over the first {_holdout.EXECUTED} steps,"
-        f" {a['joint_mae_chunk']:.4f} over the chunk; gripper {a['gripper_mae_executed']:.3f} -> {out}"
+        f"{a['n']} frames: joint MAE {a['joint_mae']:.4f} rad over the chunk; gripper {a['gripper_mae']:.3f} -> {out}"
     )
 
 
