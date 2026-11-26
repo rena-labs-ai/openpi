@@ -778,7 +778,10 @@ def _rena(
         stage_loss_weight=0.03,
         target_loss_weight=0.02 if targets == "cotrain" else 1.0,
         holdout_interval=1000 if split == "train" else 0,
-        detect_holdouts=("vl/rena_inventory_toronto", "vl/rena_inventory_holdout") if targets != "none" else (),
+        # our scenes' objects, then COCO's, to see whether grounding in general holds
+        detect_holdouts=("vl/rena_inventory_toronto", "vl/rena_inventory_holdout", "vl/refcoco_val")
+        if targets != "none"
+        else (),
         fsdp_devices=4,
         num_workers=8,
     )
@@ -1032,21 +1035,25 @@ _CONFIGS = [
                 "pi05_rena_tor_ki",
                 {"repo_id": "rena/rena_autolabel_v4_interp", "site_holdout": TORONTO, "targets": "ki"},
             ),
-            # co-trained as TRI's LBMs are: annotations and vision-language data through a backbone the flow trains too
-            (
-                "pi05_rena_tor_cotrain",
-                {
-                    "repo_id": "rena/rena_autolabel_v4_interp",
-                    "site_holdout": TORONTO,
-                    "targets": "cotrain",
-                    "vl_datasets": ("vl/refcoco", "vl/robopoint_object", "vl/robopoint_region", "vl/rena_inventory"),
-                    "vl_share": 0.1,
-                    # boxes as rena's annotations give them, points on objects and on free space, and our own scenes'
-                    # objects by argus's names (few, so about three passes over them)
-                    "vl_weights": (0.45, 0.24, 0.24, 0.07),
-                },
-            ),
         )
+    ),
+    # co-trained as TRI's LBMs are: annotations and vision-language data through a backbone the flow trains too, with
+    # the state in the prompt
+    _rena(
+        "pi05_rena_tor_cotrain",
+        state=True,
+        boxes_in="image",
+        split="train",
+        anchor="command",
+        action_norm="per_timestep",
+        repo_id="rena/rena_autolabel_v4_interp",
+        site_holdout=TORONTO,
+        targets="cotrain",
+        vl_datasets=("vl/refcoco", "vl/robopoint_object", "vl/robopoint_region", "vl/rena_inventory"),
+        vl_share=0.1,
+        # boxes as rena's annotations give them, points on objects and on free space, and our own scenes' objects by
+        # argus's names (few, so about three passes over them)
+        vl_weights=(0.45, 0.24, 0.24, 0.07),
     ),
     # pi05_rena_tor_interp and pi05_rena_tor_cotrain with the backbone's language model trained through LoRA
     _rena(
@@ -1062,7 +1069,7 @@ _CONFIGS = [
     ),
     _rena(
         "pi05_rena_tor_cotrain_lora",
-        state=False,
+        state=True,
         boxes_in="image",
         split="train",
         anchor="command",
