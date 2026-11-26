@@ -298,14 +298,16 @@ class Pi0(_model.BaseModel):
         stage_logits = self._stage_logits_from_prefix(prefix_out, prefix_mask, n_img_tokens)
         return flow_loss, stage_logits
 
-    def decode_locs(self, observation: _model.Observation, n: int = 4) -> at.Int[at.Array, "b n"]:
-        """The backbone's greedy pick of n <loc> tokens after the prompt, as bins 0-1023 (y0 x0 y1 x1 for a box), one
-        backbone pass per token over [images | prompt | the tokens so far]."""
+    def _greedy_locs(self, observation: _model.Observation, n: int) -> tuple[at.Array, at.Array]:
+        """n tokens after the prompt, one backbone pass per token over [images | prompt | the tokens so far], each the
+        likeliest <loc>: its bins [b, n] 0-1023, and whether the likeliest token over the whole vocabulary was a <loc>
+        too [b, n]."""
         observation = _model.preprocess_observation(None, observation, train=False)
         prefix_tokens, prefix_mask, prefix_ar_mask, n_img_tokens = self.embed_prefix(observation)
         b, n_prefix = prefix_tokens.shape[:2]
         last_prompt = n_img_tokens + jnp.sum(observation.tokenized_prompt_mask, axis=1) - 1
         bins = jnp.zeros((b, n), jnp.int32)
+        is_loc = jnp.zeros((b, n), jnp.bool_)
         for i in range(n):
             input_mask, attn_mask = ki_masks(prefix_mask, prefix_ar_mask, jnp.broadcast_to(jnp.arange(n) < i, (b, n)))
             targets = self.PaliGemma.llm(bins + LOC0, method="embed")
@@ -315,8 +317,23 @@ class Pi0(_model.BaseModel):
                 positions=jnp.cumsum(input_mask, axis=1) - 1,
             )
             logits = self.PaliGemma.llm(target_predictors(out, last_prompt, n_prefix)[:, i : i + 1], method="deembed")
+            best = jnp.argmax(logits[:, 0], axis=-1)
             bins = bins.at[:, i].set(jnp.argmax(logits[:, 0, LOC0 : LOC0 + 1024], axis=-1))
-        return bins
+            is_loc = is_loc.at[:, i].set((best >= LOC0) & (best < LOC0 + 1024))
+        return bins, is_loc
+
+    def decode_locs(self, observation: _model.Observation, n: int = 4) -> at.Int[at.Array, "b n"]:
+        """The backbone's greedy pick of n <loc> tokens after the prompt, as bins 0-1023 (y0 x0 y1 x1 for a box)."""
+        return self._greedy_locs(observation, n)[0]
+
+    def decode_points(
+        self, observation: _model.Observation, max_points: int = 8
+    ) -> tuple[at.Int[at.Array, "b p 2"], at.Bool[at.Array, "b p"]]:
+        """Up to max_points (y, x) points after the prompt, as RoboPoint's answers are written, decoded greedily until
+        the backbone first prefers a token that is not a <loc>: their bins [b, p, 2] and which were written [b, p]."""
+        bins, is_loc = self._greedy_locs(observation, 2 * max_points)
+        written = jnp.cumprod(is_loc, axis=1).astype(jnp.bool_)
+        return bins.reshape(-1, max_points, 2), written.reshape(-1, max_points, 2).all(-1)
 
     def compute_target_loss(self, rng, observation, actions, *, train=False):
         """The flow loss beside the backbone's cross-entropy on the target tokens, from one backbone pass over

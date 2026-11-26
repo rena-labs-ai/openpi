@@ -278,3 +278,11 @@ def test_each_decoded_loc_is_the_one_the_target_loss_finds_likeliest_after_the_o
             swapped = bins.copy()
             swapped[:, i] = other
             assert ce(bins, i) <= ce(swapped, i) + 1e-6
+
+
+def test_decoded_points_are_the_decoded_locs_in_pairs_written_until_the_first_non_loc(ki):
+    _, model, obs = ki
+    bins, written = (np.asarray(x) for x in model.decode_points(obs, max_points=3))
+    assert bins.shape == (2, 3, 2)
+    np.testing.assert_array_equal(bins.reshape(2, 6), np.asarray(model.decode_locs(obs, n=6)))
+    assert (np.diff(written.astype(int), axis=1) <= 0).all()
