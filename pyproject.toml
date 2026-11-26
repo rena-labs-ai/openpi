@@ -189,12 +189,12 @@ open-mode = "append"  # a requeued job adds to its log instead of writing over i
 
 [tool.cluv.clusters.fir]
 env = { UV_OFFLINE = "0", WANDB_MODE = "online" }
-# CUDA could not open these nodes' GPUs (2026-11-23). Half a node's memory, as on rorqual: co-training ran out of the job
+# CUDA could not open these nodes' GPUs (2026-11-23, fc10610 on 2026-11-26). Half a node's memory, as on rorqual: co-training ran out of the job
 # script's 128G saving and restoring checkpoints (2026-11-26).
 sbatch_args = [
-    { account = "def-kdarvish", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G", exclude = "fc10513,fc10608,fc10612" },
-    { account = "rrg-bengioy-ad", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G", exclude = "fc10513,fc10608,fc10612" },
-    { account = "def-gberseth", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G", exclude = "fc10513,fc10608,fc10612" },
+    { account = "def-kdarvish", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G", exclude = "fc10513,fc10608,fc10610,fc10612" },
+    { account = "rrg-bengioy-ad", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G", exclude = "fc10513,fc10608,fc10610,fc10612" },
+    { account = "def-gberseth", gpus-per-node = "h100:2", cpus-per-task = 32, mem = "250G", exclude = "fc10513,fc10608,fc10610,fc10612" },
 ]
 
 [tool.cluv.clusters.rorqual]
