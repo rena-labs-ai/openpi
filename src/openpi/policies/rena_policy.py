@@ -17,15 +17,19 @@ Outputs: actions [action_horizon, 7], and with the stage head's logits, stage_pr
 argmax, as rena-training's serving returns them.
 """
 
+from collections.abc import Callable
 import dataclasses
 import functools
 import json
+import logging
 import pathlib
 import re
-from typing import Literal
+import time
+from typing import Literal, Protocol
 
 import einops
 import numpy as np
+from openpi_client import base_policy as _base_policy
 
 from openpi import transforms
 
@@ -238,3 +242,145 @@ class AnchorOnCommand(transforms.DataTransformFn):
         state[..., :6] = prev[..., :6]
         data["observation.state"] = state
         return data
+
+
+# rena-control's rena_safety.joint_region.clamp_to_work_zone: the work zone's joint_2 edge, -0.71, less its 0.03 margin.
+J2_HELD_MAX = -0.74
+
+
+class CommandAnchor(_base_policy.BasePolicy):
+    """Gives an anchor="command" policy observation.prev_action, the robot's last commanded target, which rena's
+    clients do not send. They play a chunk to its end at the dataset's fps, hold its last step and ask again, so a
+    request that comes from one chunk's playing time to `late_s` past it gets the last step of the chunk this returned
+    before. Any other request gets the measured joints, as a recording's first frame did: a sooner one played a chunk
+    cut short at the safety shell, a later one followed a return to pre-pick or starts a new trial, and so does a new
+    prompt. In the training data the arm lags its command by 0.1 rad typically and 0.7 rad at the 99th percentile, so
+    the distance between them cannot tell these cases apart. The node holds joint_2 out of the shell before it plays a
+    chunk, so the last command is that held one; unheld, a policy pushing into the shell would anchor each chunk
+    further in."""
+
+    def __init__(self, policy: _base_policy.BasePolicy, fps: float = 25.0, late_s: float = 1.0):
+        self._policy, self._fps, self._late_s = policy, fps, late_s
+        self._prompt: str | None = None
+        self._last_command: np.ndarray | None = None
+        self._chunk_s = 0.0
+        self._replied = -np.inf
+
+    @property
+    def metadata(self) -> dict:
+        return self._policy.metadata
+
+    def infer(self, obs: dict) -> dict:
+        prompt = obs.get("prompt")
+        waited = time.monotonic() - self._replied
+        played = prompt == self._prompt and self._chunk_s <= waited <= self._chunk_s + self._late_s
+        prev = self._last_command if played else obs["observation.state"]
+        out = self._policy.infer({**obs, "observation.prev_action": np.asarray(prev, dtype=np.float32)})
+        actions = np.asarray(out["actions"])
+        last = actions[-1].copy()
+        last[1] = min(last[1], J2_HELD_MAX)
+        self._prompt, self._last_command, self._chunk_s = prompt, last, len(actions) / self._fps
+        self._replied = time.monotonic()
+        return out
+
+
+# The base cameras: fixed to the body, so a box from a trial's first frame holds until the object moves. The wrist
+# camera moves with the arm, so its box holds only for the frame it was found on.
+STATIC_BOX_CAMERAS = ("image_0", "image_2")
+WRIST_CAMERA = "image_1"
+_PICK = re.compile(r"^pick (?P<obj>.+)$")
+_PLACE = re.compile(r"^place (?P<obj>.+) (?P<prep>in|on) (?P<dest>.+)$")
+_HAS_BOXES = re.compile(r" at (?:Right|Left|Wrist): <loc\d{4}>")
+
+
+def box_question(prompt: str) -> tuple[str, str] | None:
+    """(command, what) to ask a pointer for a skill prompt's target, as rena-autolabel's deploy boxes were asked: the
+    object for "pick X", the container for "place X in Y"; None for a whole task or a prompt that has its boxes."""
+    if " and place " in prompt or _HAS_BOXES.search(prompt):
+        return None
+    if m := _PLACE.match(prompt):
+        return f"place the {m['obj']} {m['prep']} the {m['dest']}", f"the {m['dest']}"
+    if m := _PICK.match(prompt):
+        return f"pick up the {m['obj']}", f"the {m['obj']}"
+    return None
+
+
+class WristSource(Protocol):
+    """Where the wrist box comes from after a trial's first request (wrist_tracker.WristTracker through a TrackerClient):
+    start() gives it that request's frames and Gemini's box in each camera that sees the target, latest() is its newest
+    wrist box with its age in s."""
+
+    def start(self, frames: dict[str, np.ndarray], boxes: dict[str, list[float]]) -> None: ...
+
+    def stop(self) -> None: ...
+
+    def latest(self) -> tuple[list[float] | None, float]: ...
+
+
+class StaticBoxes(_base_policy.BasePolicy):
+    """A rena policy whose pick and place skill prompts get the target's box on the base cameras, as training's box
+    prompts gave it: <loc> tokens after the prompt (boxes_in "text") or outlines RenaInputs draws (boxes_in "image").
+    The boxes come from `locate` (images by camera, command, what -> box or None by camera) once per trial, on its
+    first request, and stay for the rest of it. With wrist_first, that first request also gets the wrist camera's box:
+    it is found on the very frame the policy sees, and training's boxes were up to 2 s old, while the next request
+    comes a chunk (2 s) later with the arm moved. With a wrist_tracker, later requests get the tracker's newest wrist
+    box, while it is no older than training's were (wrist_max_age_s). A trial starts when the prompt changes or after a
+    pause in requests longer than `new_trial_after_s`; other prompts pass through."""
+
+    def __init__(
+        self,
+        policy: _base_policy.BasePolicy,
+        locate: Callable[[dict[str, np.ndarray], str, str], dict[str, list[float] | None]],
+        boxes_in: Literal["text", "image"],
+        new_trial_after_s: float = 5.0,
+        *,
+        wrist_first: bool = False,
+        wrist_tracker: WristSource | None = None,
+        wrist_max_age_s: float = 2.0,
+    ):
+        self._policy, self._locate, self._boxes_in = policy, locate, boxes_in
+        self._new_trial_after_s = new_trial_after_s
+        self._tracker, self._wrist_max_age_s = wrist_tracker, wrist_max_age_s
+        wrist = wrist_first or wrist_tracker is not None
+        self._cameras = (*STATIC_BOX_CAMERAS, WRIST_CAMERA) if wrist else STATIC_BOX_CAMERAS
+        self._prompt: str | None = None
+        self._boxes: dict[str, list[float]] = {}
+        self._sizes: dict[str, tuple[int, int]] = {}
+        self._last = -np.inf
+
+    @property
+    def metadata(self) -> dict:
+        return self._policy.metadata
+
+    def infer(self, obs: dict) -> dict:
+        prompt = obs.get("prompt", "")
+        if (question := box_question(prompt)) is None:
+            return self._policy.infer(obs)
+        first = prompt != self._prompt or time.monotonic() - self._last > self._new_trial_after_s
+        if first:
+            if self._tracker:
+                self._tracker.stop()
+            images = {cam: np.asarray(obs[f"observation.images.{cam}"]) for cam in CAMERAS.values()}
+            found = self._locate(images, *question)
+            self._boxes = {cam: found[cam] for cam in self._cameras if found.get(cam)}
+            self._sizes = {cam: (im.shape[1], im.shape[0]) for cam, im in images.items()}
+            self._prompt = prompt
+            if self._tracker and (seen := {cam: box for cam, box in found.items() if box}):
+                self._tracker.start(images, seen)
+            logging.info("New trial %r: boxes %s", prompt, self._boxes)
+        boxes = {cam: box for cam, box in self._boxes.items() if first or cam in STATIC_BOX_CAMERAS}
+        if self._tracker and not first:
+            box, age = self._tracker.latest()
+            if box is not None and age <= self._wrist_max_age_s:
+                boxes[WRIST_CAMERA] = box
+        obs = dict(obs)
+        if self._boxes_in == "text":
+            from autolabel_prompts import with_boxes
+
+            obs["prompt"] = with_boxes(prompt, boxes, self._sizes)
+        else:
+            obs["target_boxes"] = boxes
+        try:
+            return self._policy.infer(obs)
+        finally:
+            self._last = time.monotonic()
