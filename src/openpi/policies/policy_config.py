@@ -3,7 +3,10 @@ import os
 import pathlib
 from typing import Any
 
+import flax.nnx as nnx
+import jax
 import jax.numpy as jnp
+import numpy as np
 
 import openpi.models.model as _model
 import openpi.policies.policy as _policy
@@ -11,6 +14,17 @@ import openpi.shared.download as download
 from openpi.training import checkpoints as _checkpoints
 from openpi.training import config as _config
 import openpi.transforms as transforms
+
+
+def load_bf16(train_config: _config.TrainConfig, params_dir: pathlib.Path):
+    """The model with its checkpoint's weights in bfloat16, built on the host and then moved to the accelerator whole:
+    Model.load builds every weight in float32 before the checkpoint's take their place, and on the accelerator that
+    build is twice the served model, which stops a server fitting several models on one GPU."""
+    params = _model.restore_params(params_dir, restore_type=np.ndarray, dtype=jnp.bfloat16)
+    with jax.default_device(jax.devices("cpu")[0]):
+        model = train_config.model.load(params)
+    graphdef, state = nnx.split(model)
+    return nnx.merge(graphdef, jax.device_put(state, jax.devices()[0]))
 
 
 def create_trained_policy(
@@ -54,7 +68,7 @@ def create_trained_policy(
         model = train_config.model.load_pytorch(train_config, weight_path)
         model.paligemma_with_expert.to_bfloat16_for_selected_params("bfloat16")
     else:
-        model = train_config.model.load(_model.restore_params(checkpoint_dir / "params", dtype=jnp.bfloat16))
+        model = load_bf16(train_config, checkpoint_dir / "params")
     data_config = train_config.data.create(train_config.assets_dirs, train_config.model)
     if norm_stats is None:
         # We are loading the norm stats from the checkpoint instead of the config assets dir to make sure
